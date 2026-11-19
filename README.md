@@ -60,6 +60,12 @@ tests/             unit + integration tests (CTest)
 docs/              architecture, risk, operations, venue onboarding
 ```
 
+## Documentation
+
+See [docs/README.md](docs/README.md) for the full index:
+architecture, order lifecycle, data model, API reference, risk model,
+testing, performance, configuration, operations, venue onboarding.
+
 ## Design rules
 
 - The OMS owns order state; RMS is a synchronous gate before EMS; EMS is
