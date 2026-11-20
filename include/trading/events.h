@@ -154,6 +154,7 @@ typedef enum {
     TS_VEV_EXEC,           /* (partial) execution; exec field populated */
     TS_VEV_REJECT,         /* venue rejected the order */
     TS_VEV_CANCEL_ACK,     /* cancel confirmed */
+    TS_VEV_AMENDED,        /* order amended/replace acknowledged by venue */
     TS_VEV_EXPIRED,        /* order expired (e.g. IOC remainder, session end) */
     TS_VEV_UNKNOWN,        /* venue state uncertain; needs reconciliation */
 } ts_venue_event_type;

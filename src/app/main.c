@@ -164,7 +164,21 @@ static int cmd_run(const char *journal_path, const char *replay_path,
         ts_log(TS_LOG_ERROR, "failed to create venue");
         return 1;
     }
-    ts_log(TS_LOG_INFO, "venue: %s", venue_name(venue));
+    /* Live-enablement gate: only simulated venues (mock/replay) run by
+     * default. Any real adapter must be explicitly enabled via
+     * [live] enabled = true in config. */
+    bool live_enabled = cfg &&
+        ts_config_get_bool(cfg, "live", "enabled", false);
+    const char *vn = venue_name(venue);
+    if (strcmp(vn, "mock") != 0 && strcmp(vn, "replay") != 0 &&
+        !live_enabled) {
+        ts_log(TS_LOG_ERROR,
+               "venue '%s' is not a simulated venue; set [live] enabled = "
+               "true to proceed", vn);
+        return 1;
+    }
+    ts_log(TS_LOG_INFO, "venue: %s (live=%s)", vn,
+           live_enabled ? "enabled" : "simulated");
     ems_config ecfg = {
         .venue = venue, .oms = oms, .rms = rms,
         .metrics = &metrics, .journal = journal, .clock = clock,

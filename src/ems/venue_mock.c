@@ -356,6 +356,60 @@ static bool mock_connected(venue_t *v)
     return m->connected;
 }
 
+static ts_status mock_amend(venue_t *v, const char *client_id,
+                            double new_price, double new_qty)
+{
+    struct mock_venue_impl *m = v->impl;
+    if (!m->connected) {
+        return TS_ERR_BAD_STATE;
+    }
+    for (size_t i = 0; i < m->working_count; ++i) {
+        mock_working *w = &m->working[i];
+        if (strcmp(w->ord.client_id, client_id) != 0) {
+            continue;
+        }
+        if (new_price > 0.0) {
+            w->ord.price = new_price;
+        }
+        if (new_qty > w->ord.filled_qty) {
+            w->ord.qty = new_qty;
+        }
+        /* AMENDED event carries new price/qty in exec fields. */
+        ts_venue_event ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.type = TS_VEV_AMENDED;
+        ts_copy_str(ev.client_id, sizeof(ev.client_id), client_id);
+        ts_copy_str(ev.instrument, sizeof(ev.instrument), w->ord.instrument);
+        ev.exec.price = w->ord.price;
+        ev.exec.qty = w->ord.qty;
+        ev.ts_ns = now_ns(m);
+        push_event(m, &ev);
+        return TS_OK;
+    }
+    return TS_ERR_NOT_FOUND;
+}
+
+static ts_status mock_cancel_all(venue_t *v)
+{
+    struct mock_venue_impl *m = v->impl;
+    if (!m->connected) {
+        return TS_ERR_BAD_STATE;
+    }
+    while (m->working_count > 0) {
+        /* reuse single-cancel path via direct event push */
+        mock_working *w = &m->working[0];
+        ts_venue_event ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.type = TS_VEV_CANCEL_ACK;
+        ts_copy_str(ev.client_id, sizeof(ev.client_id), w->ord.client_id);
+        ts_copy_str(ev.instrument, sizeof(ev.instrument), w->ord.instrument);
+        ev.ts_ns = now_ns(m);
+        push_event(m, &ev);
+        m->working[0] = m->working[--m->working_count];
+    }
+    return TS_OK;
+}
+
 static ts_status mock_open_orders(venue_t *v, ts_venue_open_order *out,
                                   size_t cap, size_t *count)
 {
@@ -402,6 +456,8 @@ static const venue_ops_t g_mock_ops = {
     .on_market_event = mock_on_market_event,
     .poll = mock_poll,
     .connected = mock_connected,
+    .amend = mock_amend,
+    .cancel_all = mock_cancel_all,
     .open_orders = mock_open_orders,
     .destroy = mock_destroy,
 };
@@ -436,5 +492,12 @@ void venue_mock_set_latency_ns(venue_t *v, ts_ts_ns latency_ns)
 {
     if (v && v->impl) {
         ((struct mock_venue_impl *)v->impl)->latency_ns = latency_ns;
+    }
+}
+
+void venue_mock_set_connected(venue_t *v, bool connected)
+{
+    if (v && v->impl) {
+        ((struct mock_venue_impl *)v->impl)->connected = connected;
     }
 }

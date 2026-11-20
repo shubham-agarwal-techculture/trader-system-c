@@ -120,13 +120,21 @@ ems_t *ems_create(const ems_config *cfg);  // {ems, venue, oms, rms, metrics, jo
 ts_status ems_submit(ems_t*, const ts_order*);   // requires NEW/HELD/RISK_APPROVED
 ems_poll(ems_t*);                                 // drain+dispatch venue events
 ems_cancel(ems_t*, client_id);
+ems_amend(ems_t*, client_id, new_price, new_qty); // venue amend op (optional)
+ems_cancel_all(ems_t*);                           // venue cancel-all op (optional)
 ems_on_market_event(ems_t*, const ts_mkt_event*);
 bool ems_venue_connected(ems_t*);
 ```
 
 Mock venue controls: `venue_mock_create(metrics, clock)`,
 `venue_mock_set_reject_all(v, bool)`, `venue_mock_set_latency_ns(v, ns)`
-(latency field reserved; not yet applied to event timing).
+(reserved), `venue_mock_set_connected(v, bool)` (disconnect simulation).
+
+`venue_ops_t` optional ops: `amend(client_id, price, qty)`,
+`cancel_all()`, `open_orders(...)`. Venue event `TS_VEV_AMENDED` carries
+the new price/qty in `ev.exec.price`/`ev.exec.qty`; EMS routes it to
+`oms_on_amend`, which updates non-terminal orders (qty cannot drop below
+`filled_qty`).
 
 ## journal.h
 

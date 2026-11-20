@@ -367,6 +367,31 @@ ts_status oms_on_cancel(oms_t *o, const char *client_id)
     return set_state(o, ord, TS_ORD_CANCELED, NULL);
 }
 
+ts_status oms_on_amend(oms_t *o, const char *client_id, double new_price,
+                       double new_qty)
+{
+    ts_order *ord = find_by_client(o, client_id);
+    if (!ord) {
+        return TS_ERR_NOT_FOUND;
+    }
+    if (ts_order_state_is_terminal(ord->state) ||
+        ord->state == TS_ORD_UNKNOWN) {
+        return TS_ERR_BAD_STATE;
+    }
+    if (new_price > 0.0) {
+        ord->price = new_price;
+    }
+    if (new_qty > 0.0) {
+        if (new_qty < ord->filled_qty) {
+            return TS_ERR_INVALID_ARG; /* can't amend below filled qty */
+        }
+        ord->qty = new_qty;
+    }
+    ord->updated_ns = now_ns(o);
+    persist_snap(o, ord);
+    return TS_OK;
+}
+
 ts_status oms_on_expire(oms_t *o, const char *client_id, const char *reason)
 {
     ts_order *ord = find_by_client(o, client_id);

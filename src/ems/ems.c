@@ -94,6 +94,29 @@ ts_status ems_cancel(ems_t *e, const char *client_id)
     return e->venue->ops->cancel(e->venue, client_id);
 }
 
+ts_status ems_amend(ems_t *e, const char *client_id, double new_price,
+                    double new_qty)
+{
+    if (!e || !client_id) {
+        return TS_ERR_INVALID_ARG;
+    }
+    if (!e->venue->ops->amend) {
+        return TS_ERR_BAD_STATE;
+    }
+    return e->venue->ops->amend(e->venue, client_id, new_price, new_qty);
+}
+
+ts_status ems_cancel_all(ems_t *e)
+{
+    if (!e) {
+        return TS_ERR_INVALID_ARG;
+    }
+    if (!e->venue->ops->cancel_all) {
+        return TS_ERR_BAD_STATE;
+    }
+    return e->venue->ops->cancel_all(e->venue);
+}
+
 void ems_on_market_event(ems_t *e, const ts_mkt_event *ev)
 {
     if (e && e->venue && e->venue->ops->on_market_event) {
@@ -127,6 +150,11 @@ static void dispatch_event(ems_t *e, const ts_venue_event *ev)
         break;
     case TS_VEV_CANCEL_ACK:
         oms_on_cancel(e->oms, ev->client_id);
+        break;
+    case TS_VEV_AMENDED:
+        oms_on_amend(e->oms, ev->client_id,
+                     ev->exec.price > 0.0 ? ev->exec.price : 0.0,
+                     ev->exec.qty > 0.0 ? ev->exec.qty : 0.0);
         break;
     case TS_VEV_EXPIRED:
         oms_on_expire(e->oms, ev->client_id, ev->reason);

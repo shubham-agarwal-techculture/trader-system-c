@@ -57,6 +57,9 @@ ctest --test-dir build --output-on-failure   # or ./build/trading_tests
 | Scripted venue events (dup exec, reject) | `hardening:replay_venue_scripted_events` |
 | Replay venue open_orders | `hardening:replay_venue_open_orders` |
 | Journal flush/fsync | `hardening:journal_flush_and_fsync` |
+| Amend working order | `hardening:amend_working_order` |
+| Cancel-all | `hardening:cancel_all` |
+| Disconnect -> UNKNOWN | `hardening:disconnect_marks_unknown` |
 
 ## Replay format (fixtures + tests)
 

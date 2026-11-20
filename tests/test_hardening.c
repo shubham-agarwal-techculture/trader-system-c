@@ -416,6 +416,122 @@ static void test_journal_flush_and_fsync(void)
     remove(path);
 }
 
+/* ---------- amend / cancel-all / disconnect ---------- */
+
+static void test_amend_working_order(void)
+{
+    ts_vclock vc = {1000};
+    ts_clock clock = ts_clock_virtual(&vc);
+    ts_metrics metrics;
+    ts_metrics_init(&metrics);
+    oms_config ocfg = {.metrics = &metrics, .clock = clock};
+    oms_t *o = oms_create(&ocfg, 64);
+    rms_config rcfg = {.metrics = &metrics, .clock = clock};
+    rms_t *r = rms_create(&rcfg);
+    venue_t *v = venue_mock_create(&metrics, clock);
+    ems_config ecfg = {.venue = v, .oms = o, .rms = r,
+                       .metrics = &metrics, .clock = clock};
+    ems_t *e = ems_create(&ecfg);
+
+    feed_quote(e, r, 99.0, 101.0);
+    submit_working(o, r, e, "a1", 90.0);
+    ASSERT_EQ_I(oms_find(o, "a1")->state, TS_ORD_WORKING);
+
+    /* amend price 90 -> 85, qty 1 -> 2 */
+    ASSERT(ems_amend(e, "a1", 85.0, 2.0) == TS_OK);
+    ASSERT(ems_poll(e) == TS_OK);
+    const ts_order *ord = oms_find(o, "a1");
+    ASSERT_EQ_D(ord->price, 85.0, 1e-9);
+    ASSERT_EQ_D(ord->qty, 2.0, 1e-9);
+    ASSERT_EQ_I(ord->state, TS_ORD_WORKING);
+
+    ems_destroy(e);
+    v->ops->destroy(v);
+    rms_destroy(r);
+    oms_destroy(o);
+}
+
+static void test_cancel_all(void)
+{
+    ts_vclock vc = {1000};
+    ts_clock clock = ts_clock_virtual(&vc);
+    ts_metrics metrics;
+    ts_metrics_init(&metrics);
+    oms_config ocfg = {.metrics = &metrics, .clock = clock};
+    oms_t *o = oms_create(&ocfg, 64);
+    rms_config rcfg = {.metrics = &metrics, .clock = clock};
+    rms_t *r = rms_create(&rcfg);
+    venue_t *v = venue_mock_create(&metrics, clock);
+    ems_config ecfg = {.venue = v, .oms = o, .rms = r,
+                       .metrics = &metrics, .clock = clock};
+    ems_t *e = ems_create(&ecfg);
+
+    feed_quote(e, r, 99.0, 101.0);
+    submit_working(o, r, e, "ca1", 90.0);
+    submit_working(o, r, e, "ca2", 91.0);
+    ASSERT_EQ_I(oms_open_count(o), 2);
+
+    ASSERT(ems_cancel_all(e) == TS_OK);
+    ASSERT(ems_poll(e) == TS_OK);
+    ASSERT_EQ_I(oms_find(o, "ca1")->state, TS_ORD_CANCELED);
+    ASSERT_EQ_I(oms_find(o, "ca2")->state, TS_ORD_CANCELED);
+    ASSERT_EQ_I(oms_open_count(o), 0);
+
+    ems_destroy(e);
+    v->ops->destroy(v);
+    rms_destroy(r);
+    oms_destroy(o);
+}
+
+static void test_disconnect_marks_unknown(void)
+{
+    ts_vclock vc = {1000};
+    ts_clock clock = ts_clock_virtual(&vc);
+    ts_metrics metrics;
+    ts_metrics_init(&metrics);
+    oms_config ocfg = {.metrics = &metrics, .clock = clock};
+    oms_t *o = oms_create(&ocfg, 64);
+    rms_config rcfg = {.metrics = &metrics, .clock = clock};
+    rms_t *r = rms_create(&rcfg);
+    venue_t *v = venue_mock_create(&metrics, clock);
+    ems_config ecfg = {.venue = v, .oms = o, .rms = r,
+                       .metrics = &metrics, .clock = clock};
+    ems_t *e = ems_create(&ecfg);
+
+    feed_quote(e, r, 99.0, 101.0);
+    venue_mock_set_connected(v, false);
+    ASSERT(!ems_venue_connected(e));
+
+    /* drive order manually: submit -> risk -> ems_submit (fails) */
+    ts_order_request req;
+    memset(&req, 0, sizeof(req));
+    ts_copy_str(req.client_id, sizeof(req.client_id), "dc1");
+    ts_copy_str(req.instrument, sizeof(req.instrument), "BTCUSDT");
+    req.side = TS_SIDE_BUY;
+    req.type = TS_ORD_LIMIT;
+    req.tif = TS_TIF_GTC;
+    req.qty = 1.0;
+    req.price = 90.0;
+    ASSERT(oms_submit(o, &req, NULL) == TS_OK);
+    ts_order ord = *oms_find(o, "dc1");
+    ASSERT(rms_check_order(r, &ord).approved);
+    ASSERT(oms_mark_risk(o, "dc1", true, "OK", "") == TS_OK);
+    ord = *oms_find(o, "dc1");
+    ASSERT(ems_submit(e, &ord) == TS_ERR_BAD_STATE);
+    /* venue submit fails (disconnected) -> order marked UNKNOWN */
+    ASSERT_EQ_I(oms_find(o, "dc1")->state, TS_ORD_UNKNOWN);
+
+    /* reconnect: venue accepts again but order stays UNKNOWN until
+     * explicit reconciliation resolves it */
+    venue_mock_set_connected(v, true);
+    ASSERT(ems_venue_connected(e));
+
+    ems_destroy(e);
+    v->ops->destroy(v);
+    rms_destroy(r);
+    oms_destroy(o);
+}
+
 const test_case hardening_tests[] = {
     {"config_load_and_get", test_config_load_and_get},
     {"seqwatch_gaps", test_seqwatch_gaps},
@@ -424,5 +540,8 @@ const test_case hardening_tests[] = {
     {"replay_venue_scripted_events", test_replay_venue_scripted_events},
     {"replay_venue_open_orders", test_replay_venue_open_orders},
     {"journal_flush_and_fsync", test_journal_flush_and_fsync},
+    {"amend_working_order", test_amend_working_order},
+    {"cancel_all", test_cancel_all},
+    {"disconnect_marks_unknown", test_disconnect_marks_unknown},
     {NULL, NULL},
 };

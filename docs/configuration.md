@@ -30,6 +30,10 @@ script = venue.txt   # replay only
 [journal]
 flush = true         # fflush per record (default on)
 fsync = false        # fsync per record (expensive; live option)
+
+[live]
+enabled = false      # REQUIRED to run any non-simulated venue
+                      # (anything other than mock/replay)
 ```
 
 CLI flags override nothing in the file — flags win for journal/replay/

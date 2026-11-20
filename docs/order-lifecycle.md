@@ -88,8 +88,14 @@ order. On restart, `journal_replay` -> `oms_restore_order` installs the
 latest snapshot per `client_id`; open orders are those in non-terminal
 states (`oms_open_count`).
 
-## Cancel/amend
+## Amend
 
-`ems_cancel` -> `venue_ops.cancel` -> venue emits `TS_VEV_CANCEL_ACK` ->
-`oms_on_cancel` -> `CANCELED`. Amend/replace is not yet implemented
-(Phase 3+ per venue capability).
+`ems_amend` -> `venue_ops.amend` -> venue emits `TS_VEV_AMENDED` ->
+`oms_on_amend` updates `price`/`qty` on non-terminal orders and persists
+a `SNAP`. Quantity may not be amended below `filled_qty`.
+
+## Cancel / cancel-all
+
+`ems_cancel` / `ems_cancel_all` -> `venue_ops.cancel`/`cancel_all` ->
+per-order `TS_VEV_CANCEL_ACK` events -> `oms_on_cancel` -> `CANCELED`.
+Cancel-all emits one ACK per working order.

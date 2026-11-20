@@ -44,6 +44,9 @@ ts_status oms_on_ack(oms_t *o, const char *client_id,
 ts_status oms_on_execution(oms_t *o, const ts_execution *exec);
 ts_status oms_on_reject(oms_t *o, const char *client_id, const char *reason);
 ts_status oms_on_cancel(oms_t *o, const char *client_id);
+/* Amend price/qty of a non-terminal order (venue-confirmed). */
+ts_status oms_on_amend(oms_t *o, const char *client_id, double new_price,
+                       double new_qty);
 ts_status oms_on_expire(oms_t *o, const char *client_id, const char *reason);
 ts_status oms_on_unknown(oms_t *o, const char *client_id, const char *reason);
 

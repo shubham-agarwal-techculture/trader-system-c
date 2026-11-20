@@ -33,6 +33,11 @@ void ems_destroy(ems_t *e);
  * outcomes arrive via ems_poll(). */
 ts_status ems_submit(ems_t *e, const ts_order *ord);
 ts_status ems_cancel(ems_t *e, const char *client_id);
+/* Amend an open order at the venue (price<=0 keeps, qty<=0 keeps). */
+ts_status ems_amend(ems_t *e, const char *client_id, double new_price,
+                    double new_qty);
+/* Cancel all venue-open orders; per-order CANCEL_ACKs arrive via poll. */
+ts_status ems_cancel_all(ems_t *e);
 
 /* Forward a market event to the venue (needed for paper matching and for
  * venues that consume their own feed). */
