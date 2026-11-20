@@ -6,6 +6,7 @@
 #include "trading/oms.h"
 #include "trading/rms.h"
 #include "trading/seqwatch.h"
+#include "trading/strategy.h"
 #include "trading/venue.h"
 
 #include <stdio.h>
@@ -532,6 +533,136 @@ static void test_disconnect_marks_unknown(void)
     oms_destroy(o);
 }
 
+static void test_book_replay_and_self_trade(void)
+{
+    /* BOOK line: 2 levels */
+    const char *path = "test_book_feed.txt";
+    FILE *f = fopen(path, "w");
+    ASSERT(f != NULL);
+    fprintf(f, "BOOK BTCUSDT 2 99.0 1.5 101.0 2.0 98.5 3.0 101.5 1.0\n");
+    fclose(f);
+
+    replay_t *rep = replay_open(path);
+    ASSERT(rep != NULL);
+    ts_mkt_event ev;
+    ASSERT(replay_next(rep, &ev) == TS_OK);
+    ASSERT_EQ_I(ev.type, TS_MKT_BOOK);
+    ASSERT_EQ_I(ev.book_depth, 2);
+    ASSERT_EQ_D(ev.bid, 99.0, 1e-9);
+    ASSERT_EQ_D(ev.ask, 101.0, 1e-9);
+    ASSERT_EQ_D(ev.bid_px[1], 98.5, 1e-9);
+    ASSERT_EQ_D(ev.ask_qty_lv[1], 1.0, 1e-9);
+    replay_close(rep);
+    remove(path);
+
+    /* self-trade: resting sell at 100, new buy at 100 crosses */
+    ts_vclock vc = {1000};
+    ts_clock clock = ts_clock_virtual(&vc);
+    oms_config ocfg = {.clock = clock};
+    oms_t *o = oms_create(&ocfg, 16);
+
+    ts_order_request sell;
+    memset(&sell, 0, sizeof(sell));
+    ts_copy_str(sell.client_id, sizeof(sell.client_id), "s1");
+    ts_copy_str(sell.instrument, sizeof(sell.instrument), "BTCUSDT");
+    sell.side = TS_SIDE_SELL;
+    sell.type = TS_ORD_LIMIT;
+    sell.tif = TS_TIF_GTC;
+    sell.qty = 1.0;
+    sell.price = 100.0;
+    ASSERT(oms_submit(o, &sell, NULL) == TS_OK);
+    /* move it to WORKING so it's "resting" */
+    ASSERT(oms_mark_risk(o, "s1", true, "OK", "") == TS_OK);
+    ASSERT(oms_on_ack(o, "s1", "V1") == TS_OK);
+
+    ts_order_request buy;
+    memset(&buy, 0, sizeof(buy));
+    ts_copy_str(buy.client_id, sizeof(buy.client_id), "b1");
+    ts_copy_str(buy.instrument, sizeof(buy.instrument), "BTCUSDT");
+    buy.side = TS_SIDE_BUY;
+    buy.type = TS_ORD_LIMIT;
+    buy.tif = TS_TIF_GTC;
+    buy.qty = 1.0;
+    buy.price = 100.0; /* crosses the resting sell at 100 */
+    ASSERT(oms_would_self_trade(o, &buy));
+
+    buy.price = 99.0; /* below sell: no cross */
+    ASSERT(!oms_would_self_trade(o, &buy));
+
+    /* same-side orders never self-trade */
+    buy.side = TS_SIDE_SELL;
+    buy.price = 101.0;
+    ASSERT(!oms_would_self_trade(o, &buy));
+
+    oms_destroy(o);
+}
+
+static void test_dummy_venue_latency_and_partial(void)
+{
+    ts_vclock vc = {1000000000LL};
+    ts_clock clock = ts_clock_virtual(&vc);
+    ts_metrics metrics;
+    ts_metrics_init(&metrics);
+    venue_t *v = venue_dummy_create(&metrics, clock);
+    ASSERT(v != NULL);
+    ASSERT_STR(v->ops->name, "dummy");
+    venue_dummy_set_latency_ns(v, 500000000LL);   /* 0.5s */
+    venue_dummy_set_fill_fraction(v, 0.5);        /* half fills */
+
+    oms_config ocfg = {.metrics = &metrics, .clock = clock};
+    oms_t *o = oms_create(&ocfg, 64);
+    rms_config rcfg = {.metrics = &metrics, .clock = clock};
+    rms_t *r = rms_create(&rcfg);
+    ems_config ecfg = {.venue = v, .oms = o, .rms = r,
+                       .metrics = &metrics, .clock = clock};
+    ems_t *e = ems_create(&ecfg);
+
+    /* quote */
+    ts_mkt_event q;
+    memset(&q, 0, sizeof(q));
+    q.type = TS_MKT_QUOTE;
+    ts_copy_str(q.instrument, sizeof(q.instrument), "BTCUSDT");
+    q.bid = 99.0; q.ask = 101.0; q.last = 100.0; q.ts_ns = vc.now;
+    ems_on_market_event(e, &q);
+    rms_on_quote(r, q.instrument, q.bid, q.ask, q.last, vc.now);
+
+    /* market buy qty 2 -> fills 1.0 now (50%), rest pending */
+    ts_order_request req;
+    memset(&req, 0, sizeof(req));
+    ts_copy_str(req.client_id, sizeof(req.client_id), "dm1");
+    ts_copy_str(req.instrument, sizeof(req.instrument), "BTCUSDT");
+    req.side = TS_SIDE_BUY;
+    req.type = TS_ORD_MARKET;
+    req.tif = TS_TIF_GTC;
+    req.qty = 2.0;
+    ASSERT(oms_submit(o, &req, NULL) == TS_OK);
+    ts_order ord = *oms_find(o, "dm1");
+    ASSERT(rms_check_order(r, &ord).approved);
+    ASSERT(oms_mark_risk(o, "dm1", true, "OK", "") == TS_OK);
+    ord = *oms_find(o, "dm1");
+    ASSERT(ems_submit(e, &ord) == TS_OK);
+
+    /* latency: events not visible until +0.5s */
+    ASSERT(ems_poll(e) == TS_OK); /* nothing ready yet */
+    ASSERT_EQ_I(oms_find(o, "dm1")->state, TS_ORD_RISK_APPROVED);
+
+    vc.now += 600000000LL;
+    ASSERT(ems_poll(e) == TS_OK); /* ACK + first partial EXEC */
+    const ts_order *after = oms_find(o, "dm1");
+    ASSERT(after->state == TS_ORD_PARTIAL || after->state == TS_ORD_WORKING);
+
+    /* second market event triggers another 50% chunk of remainder */
+    q.ts_ns = vc.now;
+    ems_on_market_event(e, &q);
+    vc.now += 600000000LL;
+    ASSERT(ems_poll(e) == TS_OK);
+
+    ems_destroy(e);
+    rms_destroy(r);
+    oms_destroy(o);
+    v->ops->destroy(v);
+}
+
 const test_case hardening_tests[] = {
     {"config_load_and_get", test_config_load_and_get},
     {"seqwatch_gaps", test_seqwatch_gaps},
@@ -543,5 +674,7 @@ const test_case hardening_tests[] = {
     {"amend_working_order", test_amend_working_order},
     {"cancel_all", test_cancel_all},
     {"disconnect_marks_unknown", test_disconnect_marks_unknown},
+    {"book_replay_and_self_trade", test_book_replay_and_self_trade},
+    {"dummy_venue_latency_and_partial", test_dummy_venue_latency_and_partial},
     {NULL, NULL},
 };

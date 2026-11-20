@@ -16,6 +16,14 @@
 First failing rule wins; the rule name and detail are journaled via
 `oms_mark_risk` (`RISK` records) and returned in `ts_risk_result`.
 
+## Self-trade prevention
+
+`oms_would_self_trade()` runs in the order path before `rms_check_order`:
+a new order is rejected with rule `SELF_TRADE` if it would cross a
+non-terminal opposite-side order on the same instrument. Market orders
+cross conservatively against any opposite-side working order; limit
+orders cross on price overlap.
+
 ## Post-trade
 
 - `rms_on_execution` updates signed position, average cost, and realized

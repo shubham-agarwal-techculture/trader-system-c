@@ -37,7 +37,16 @@ static void order_sink(void *ctx, const ts_order_request *req)
         return;
     }
 
-    ts_risk_result risk = rms_check_order(p->rms, &ord);
+    ts_risk_result risk;
+    if (oms_would_self_trade(p->oms, req)) {
+        risk.approved = false;
+        risk.code = TS_RISK_DUPLICATE;
+        risk.rule = "SELF_TRADE";
+        snprintf(risk.msg, sizeof(risk.msg),
+                 "would cross own working order");
+    } else {
+        risk = rms_check_order(p->rms, &ord);
+    }
     oms_mark_risk(p->oms, req->client_id, risk.approved,
                   risk.rule, risk.msg);
     if (!risk.approved) {
@@ -153,11 +162,28 @@ static int cmd_run(const char *journal_path, const char *replay_path,
         }
     }
     if (!venue) {
-        venue = venue_mock_create(&metrics, clock);
-        if (cfg && venue) {
-            bool reject = ts_config_get_bool(cfg, "venue", "reject_all",
-                                             false);
-            venue_mock_set_reject_all(venue, reject);
+        if (strcmp(vtype, "dummy") == 0) {
+            venue = venue_dummy_create(&metrics, clock);
+            if (venue && cfg) {
+                venue_dummy_set_latency_ns(
+                    venue, ts_config_get_i64(cfg, "venue", "latency_ns", 0));
+                venue_dummy_set_fill_fraction(
+                    venue, ts_config_get_double(cfg, "venue",
+                                                "fill_fraction", 1.0));
+                venue_dummy_set_reject_every(
+                    venue, (int)ts_config_get_i64(cfg, "venue",
+                                                  "reject_every", 0));
+                venue_dummy_set_max_orders_per_sec(
+                    venue, ts_config_get_double(cfg, "venue",
+                                                "max_orders_per_sec", 0.0));
+            }
+        } else {
+            venue = venue_mock_create(&metrics, clock);
+            if (cfg && venue) {
+                bool reject = ts_config_get_bool(cfg, "venue", "reject_all",
+                                                 false);
+                venue_mock_set_reject_all(venue, reject);
+            }
         }
     }
     if (!venue) {
@@ -171,7 +197,7 @@ static int cmd_run(const char *journal_path, const char *replay_path,
         ts_config_get_bool(cfg, "live", "enabled", false);
     const char *vn = venue_name(venue);
     if (strcmp(vn, "mock") != 0 && strcmp(vn, "replay") != 0 &&
-        !live_enabled) {
+        strcmp(vn, "dummy") != 0 && !live_enabled) {
         ts_log(TS_LOG_ERROR,
                "venue '%s' is not a simulated venue; set [live] enabled = "
                "true to proceed", vn);

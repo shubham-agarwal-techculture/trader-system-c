@@ -53,6 +53,12 @@ ts_status oms_on_unknown(oms_t *o, const char *client_id, const char *reason);
 /* Recovery: install an order snapshot read from the journal. */
 ts_status oms_restore_order(oms_t *o, const ts_order *snapshot);
 
+/* Self-trade check: true if submitting req would cross an existing
+ * non-terminal order on the opposite side of the same instrument.
+ * Market orders cross any opposite-side working order; limit orders
+ * cross when buy.price >= resting sell.price (or vice versa). */
+bool oms_would_self_trade(const oms_t *o, const ts_order_request *req);
+
 /* Find orders in a given state (for reconciliation reporting). */
 size_t oms_orders_in_state(const oms_t *o, ts_order_state state,
                            ts_order *out, size_t cap);

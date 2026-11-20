@@ -429,6 +429,32 @@ ts_status oms_restore_order(oms_t *o, const ts_order *snapshot)
     return TS_OK;
 }
 
+bool oms_would_self_trade(const oms_t *o, const ts_order_request *req)
+{
+    if (!o || !req) {
+        return false;
+    }
+    for (size_t i = 0; i < o->count; ++i) {
+        const ts_order *w = &o->orders[i];
+        if (strcmp(w->instrument, req->instrument) != 0 ||
+            w->side == req->side ||
+            ts_order_state_is_terminal(w->state)) {
+            continue;
+        }
+        /* opposite side, still open */
+        if (req->type == TS_ORD_MARKET || w->type == TS_ORD_MARKET) {
+            return true; /* can't prove non-crossing; be conservative */
+        }
+        if (req->side == TS_SIDE_BUY && req->price >= w->price) {
+            return true;
+        }
+        if (req->side == TS_SIDE_SELL && req->price <= w->price) {
+            return true;
+        }
+    }
+    return false;
+}
+
 size_t oms_orders_in_state(const oms_t *o, ts_order_state state,
                            ts_order *out, size_t cap)
 {

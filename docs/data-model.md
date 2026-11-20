@@ -27,6 +27,11 @@ Normalized market data. `type` selects interpretation:
 - `TS_MKT_QUOTE` — `bid`, `ask`, optional `last`, sizes in `*_qty`
 - `TS_MKT_TRADE` — `last` = trade price, `last_qty` = size
 - `TS_MKT_SNAPSHOT` — full snapshot; same fields as quote plus sizes
+- `TS_MKT_BOOK` — top-N book snapshot: `book_depth` levels in
+  `bid_px/bid_qty_lv/ask_px/ask_qty_lv` (best first, max `TS_BOOK_DEPTH`=8);
+  `bid`/`ask`/`bid_qty`/`ask_qty` mirror level 0
+
+Replay format adds: `BOOK <instrument> <depth> <bpx1> <bqy1> <apx1> <aqy1> ...`
 
 `ts_ns` is the exchange/feed timestamp; `seq` is the feed sequence number
 (gap detection is a Phase 4 item — the field exists today).

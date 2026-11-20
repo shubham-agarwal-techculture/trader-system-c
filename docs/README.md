@@ -17,5 +17,9 @@
   venue knobs, clock, journal
 - [operations.md](operations.md) — metrics, kill switch, recovery
   procedure, alerting hooks, secrets policy
+- [venue-adapters.md](venue-adapters.md) — venue_ops contract, mock /
+  replay / dummy adapters, event types, live gate, real-adapter checklist
+- [operations-runbook.md](operations-runbook.md) — startup sequence, order
+  path, recovery, kill switch, alerting, emergency procedures
 - [venue-onboarding.md](venue-onboarding.md) — how to add exchange/broker
   adapters

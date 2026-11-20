@@ -74,6 +74,16 @@ void venue_mock_set_connected(venue_t *v, bool connected);
 venue_t *venue_replay_create(const char *path, ts_metrics *metrics,
                              ts_clock clock);
 
+/* Dummy venue (src/ems/venue_dummy.c): realistic simulated venue with
+ * configurable latency, partial fills, deterministic rejects, and rate
+ * limits — for exercising the live-order path pre-real-adapter. */
+venue_t *venue_dummy_create(ts_metrics *metrics, ts_clock clock);
+void venue_dummy_set_latency_ns(venue_t *v, ts_ts_ns ns);
+void venue_dummy_set_fill_fraction(venue_t *v, double frac);
+void venue_dummy_set_reject_every(venue_t *v, int n);
+void venue_dummy_set_max_orders_per_sec(venue_t *v, double n);
+void venue_dummy_set_connected(venue_t *v, bool connected);
+
 #ifdef __cplusplus
 }
 #endif

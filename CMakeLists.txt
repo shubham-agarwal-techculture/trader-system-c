@@ -30,6 +30,7 @@ set(TRADING_SOURCES
     src/ems/ems.c
     src/ems/venue_mock.c
     src/ems/venue_replay.c
+    src/ems/venue_dummy.c
     src/strategy/replay.c
     src/strategy/momentum.c
 )

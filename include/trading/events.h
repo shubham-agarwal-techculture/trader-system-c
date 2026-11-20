@@ -42,7 +42,10 @@ typedef enum {
     TS_MKT_QUOTE = 0,
     TS_MKT_TRADE,
     TS_MKT_SNAPSHOT,
+    TS_MKT_BOOK,   /* top-N book snapshot; see book_depth fields */
 } ts_mkt_type;
+
+#define TS_BOOK_DEPTH 8
 
 typedef struct {
     ts_mkt_type type;
@@ -55,6 +58,13 @@ typedef struct {
     double last_qty;
     ts_ts_ns ts_ns;   /* exchange/feed timestamp */
     uint64_t seq;     /* feed sequence number */
+    /* L2 top-of-book levels, best first. Only meaningful when
+     * type == TS_MKT_BOOK or book_depth > 0. level i: index i. */
+    uint8_t book_depth;
+    double bid_px[TS_BOOK_DEPTH];
+    double bid_qty_lv[TS_BOOK_DEPTH];
+    double ask_px[TS_BOOK_DEPTH];
+    double ask_qty_lv[TS_BOOK_DEPTH];
 } ts_mkt_event;
 
 /* ---------------- Orders ---------------- */

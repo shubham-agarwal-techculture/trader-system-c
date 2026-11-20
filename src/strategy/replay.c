@@ -93,6 +93,38 @@ ts_status replay_next(replay_t *r, ts_mkt_event *ev)
             ev->bid = a;
             ev->ask = b;
             ev->last = (n >= 5) ? c : (a + b) * 0.5;
+        } else if (strcmp(tag, "BOOK") == 0) {
+            /* BOOK <instr> <depth> then depth x (bid_px bid_qty ask_px ask_qty) */
+            ev->type = TS_MKT_BOOK;
+            char work[1024];
+            snprintf(work, sizeof(work), "%s", line);
+            char *fields[80];
+            int nf = 0;
+            char *tokp = strtok(work, " \t\r\n");
+            while (tokp && nf < 80) {
+                fields[nf++] = tokp;
+                tokp = strtok(NULL, " \t\r\n");
+            }
+            int depth = nf > 2 ? atoi(fields[2]) : 0;
+            if (depth < 1) depth = 1;
+            if (depth > TS_BOOK_DEPTH) depth = TS_BOOK_DEPTH;
+            if (nf >= 3 + 4 * depth) {
+                int base = 3;
+                ev->book_depth = (uint8_t)depth;
+                for (int i = 0; i < depth; ++i) {
+                    ev->bid_px[i] = strtod(fields[base + i * 4], NULL);
+                    ev->bid_qty_lv[i] = strtod(fields[base + i * 4 + 1], NULL);
+                    ev->ask_px[i] = strtod(fields[base + i * 4 + 2], NULL);
+                    ev->ask_qty_lv[i] = strtod(fields[base + i * 4 + 3], NULL);
+                }
+                ev->bid = ev->bid_px[0];
+                ev->ask = ev->ask_px[0];
+                ev->bid_qty = ev->bid_qty_lv[0];
+                ev->ask_qty = ev->ask_qty_lv[0];
+                ev->last = (ev->bid + ev->ask) * 0.5;
+            } else {
+                continue;
+            }
         } else if (strcmp(tag, "TRADE") == 0) {
             ev->type = TS_MKT_TRADE;
             ev->last = a;
