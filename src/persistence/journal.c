@@ -16,7 +16,38 @@ struct journal {
     bool writing;
     bool flush;   /* fflush after every record (default on for append) */
     bool fsync;   /* fsync/_commit after every record (default off) */
+    int64_t max_bytes; /* rotation threshold; 0 = disabled */
 };
+
+void journal_set_max_bytes(journal_t *j, int64_t max_bytes)
+{
+    if (j) {
+        j->max_bytes = max_bytes;
+    }
+}
+
+static void maybe_rotate(journal_t *j, const char *path)
+{
+    if (!j->writing || j->max_bytes <= 0 || !path) {
+        return;
+    }
+    /* Measure current size via fseek/ftell on the open append stream. */
+    if (fseek(j->fp, 0, SEEK_END) != 0) {
+        return;
+    }
+    long size = ftell(j->fp);
+    if (size < 0 || (int64_t)size < j->max_bytes) {
+        return;
+    }
+    /* Close, rename to .1, reopen append. */
+    char rotated[1024];
+    snprintf(rotated, sizeof(rotated), "%s.1", path);
+    fclose(j->fp);
+    remove(rotated);
+    rename(path, rotated);
+    j->fp = fopen(path, "a");
+    j->flush = true;
+}
 
 journal_t *journal_open_append(const char *path)
 {
@@ -37,6 +68,7 @@ journal_t *journal_open_append(const char *path)
     j->fp = fp;
     j->writing = true;
     j->flush = true;
+    maybe_rotate(j, path);
     return j;
 }
 

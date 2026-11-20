@@ -663,6 +663,64 @@ static void test_dummy_venue_latency_and_partial(void)
     v->ops->destroy(v);
 }
 
+static int g_bi_orders;
+static void bi_sink(void *ctx, const ts_order_request *req)
+{
+    (void)ctx;
+    g_bi_orders++;
+    ASSERT(req->side == TS_SIDE_BUY || req->side == TS_SIDE_SELL);
+    ASSERT(req->type == TS_ORD_MARKET);
+}
+
+static void test_book_imbalance_strategy(void)
+{
+    g_bi_orders = 0;
+    bookimb_config cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    ts_copy_str(cfg.instrument, sizeof(cfg.instrument), "BTCUSDT");
+    cfg.qty = 0.1;
+    cfg.imbalance_threshold = 0.3;
+    cfg.sink = bi_sink;
+    strategy_t *s = strategy_book_imbalance_create(&cfg);
+    ASSERT(s != NULL);
+    ASSERT_STR(s->name, "book_imbalance");
+
+    ts_mkt_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = TS_MKT_BOOK;
+    ts_copy_str(ev.instrument, sizeof(ev.instrument), "BTCUSDT");
+    ev.book_depth = 2;
+    /* bids heavy -> BUY expected */
+    ev.bid_px[0] = 99; ev.bid_qty_lv[0] = 5; ev.ask_px[0] = 101; ev.ask_qty_lv[0] = 1;
+    ev.bid_px[1] = 98; ev.bid_qty_lv[1] = 4; ev.ask_px[1] = 102; ev.ask_qty_lv[1] = 1;
+    ASSERT(s->on_event(s, &ev) == TS_OK);
+    ASSERT_EQ_I(g_bi_orders, 1);
+
+    /* same direction again -> suppressed */
+    ASSERT(s->on_event(s, &ev) == TS_OK);
+    ASSERT_EQ_I(g_bi_orders, 1);
+
+    /* asks heavy -> SELL */
+    ev.bid_qty_lv[0] = 1; ev.ask_qty_lv[0] = 5;
+    ev.bid_qty_lv[1] = 1; ev.ask_qty_lv[1] = 4;
+    ASSERT(s->on_event(s, &ev) == TS_OK);
+    ASSERT_EQ_I(g_bi_orders, 2);
+
+    /* balanced -> no order */
+    ev.bid_qty_lv[0] = 3; ev.ask_qty_lv[0] = 3;
+    ev.bid_qty_lv[1] = 3; ev.ask_qty_lv[1] = 3;
+    ASSERT(s->on_event(s, &ev) == TS_OK);
+    ASSERT_EQ_I(g_bi_orders, 2);
+
+    /* non-book event ignored */
+    ev.type = TS_MKT_QUOTE;
+    ev.book_depth = 0;
+    ASSERT(s->on_event(s, &ev) == TS_OK);
+    ASSERT_EQ_I(g_bi_orders, 2);
+
+    s->destroy(s);
+}
+
 const test_case hardening_tests[] = {
     {"config_load_and_get", test_config_load_and_get},
     {"seqwatch_gaps", test_seqwatch_gaps},
@@ -676,5 +734,6 @@ const test_case hardening_tests[] = {
     {"disconnect_marks_unknown", test_disconnect_marks_unknown},
     {"book_replay_and_self_trade", test_book_replay_and_self_trade},
     {"dummy_venue_latency_and_partial", test_dummy_venue_latency_and_partial},
+    {"book_imbalance_strategy", test_book_imbalance_strategy},
     {NULL, NULL},
 };

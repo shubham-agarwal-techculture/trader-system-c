@@ -60,6 +60,7 @@ ctest --test-dir build --output-on-failure   # or ./build/trading_tests
 | Amend working order | `hardening:amend_working_order` |
 | Cancel-all | `hardening:cancel_all` |
 | Disconnect -> UNKNOWN | `hardening:disconnect_marks_unknown` |
+| Book-imbalance strategy | `hardening:book_imbalance_strategy` |
 
 ## Replay format (fixtures + tests)
 

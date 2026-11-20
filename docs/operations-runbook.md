@@ -58,8 +58,18 @@ via `ems_reconcile`.
 - `flush=true` (default): `fflush` per record — survives process crash,
   not OS crash.
 - `fsync=true`: `fsync`/`_commit` per record — survives OS crash; expensive.
-- No rotation/checkpointing yet (Phase 4+): for production add size-based
-  rotation + periodic `SNAPSHOT` records.
+- `max_size_mb=N`: at open, files larger than N MB are renamed to
+  `<file>.1` (single generation) before appending. Recovery must replay
+  both `.1` and current file if both exist.
+
+## Live mode (Kraken)
+
+`trading_sim live` requires `[live] enabled = true`, Kraken env creds,
+and a `[venue] type = kraken` config. It polls the public Ticker
+endpoint at `--interval-ms` cadence, runs seqwatch -> RMS marks ->
+strategy -> OMS/RMS/EMS -> `ems_poll` (which diffs TradesHistory for
+fills), and ends with `ems_reconcile` + metrics. Orders are REAL —
+start with minimum-size limits and `rms_kill` ready.
 
 ## Emergency procedures
 

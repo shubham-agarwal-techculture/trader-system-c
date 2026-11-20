@@ -19,8 +19,9 @@ max_quote_age_ns = 0
 [strategy]
 instrument = BTCUSDT
 qty = 0.5
-move_threshold = 0.5
-name = mom
+move_threshold = 0.5     # momentum only
+imbalance_threshold = 0.3 # book_imbalance only
+name = momentum          # momentum | book_imbalance
 
 [venue]
 type = mock          # mock | replay
@@ -30,11 +31,14 @@ script = venue.txt   # replay only
 [journal]
 flush = true         # fflush per record (default on)
 fsync = false        # fsync per record (expensive; live option)
+max_size_mb = 0      # rotate to <file>.1 when exceeded at open (0 = off)
 
 [live]
-enabled = false      # REQUIRED to run any non-simulated venue
-                      # (anything other than mock/replay)
+enabled = false      # REQUIRED for kraken (and any future real venue)
 ```
+
+Kraken credentials come from env vars `KRAKEN_API_KEY` /
+`KRAKEN_API_SECRET` — never from config files.
 
 CLI flags override nothing in the file — flags win for journal/replay/
 instrument/venue-script paths; config supplies risk limits, strategy
@@ -44,8 +48,15 @@ params, venue type, and journal durability.
 
 ```
 trading_sim run --journal FILE --replay FILE [--instrument CODE] [--config FILE] [--venue-script FILE]
+trading_sim live --journal FILE --config FILE [--instrument CODE] [--duration-s N] [--interval-ms N]
 trading_sim recover --journal FILE
 ```
+
+`live` pulls market data from the Kraken venue (REST ticker poll) and
+runs the full pipeline against the real exchange. Requires
+`[live] enabled = true` + `KRAKEN_API_KEY`/`KRAKEN_API_SECRET` env vars.
+`--duration-s 0` runs until interrupted; `--interval-ms` sets the poll
+cadence (default 1000, Kraken public rate limit ~1 req/s).
 
 | Flag | Default | Meaning |
 |---|---|---|

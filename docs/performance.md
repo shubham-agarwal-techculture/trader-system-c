@@ -3,6 +3,43 @@
 HFT is a target, not an assumption. This document records the current
 design decisions and the measurement plan.
 
+## Measured results (MSVC RelWithDebInfo, Windows)
+
+`trading_bench --events 100000` drives synthetic quotes through the full
+pipeline (seqwatch -> RMS marks -> dummy venue -> momentum strategy ->
+OMS/RMS/EMS -> poll) with the durable journal enabled.
+
+| Metric | Before OMS hash index | After client_id hash | After venue-id hash |
+|---|---|---|---|
+| Throughput | ~1,337 events/sec | ~6,072 events/sec | ~5,950-6,120 events/sec |
+| Orders in bench | 65,536 (OMS cap) | 65,536 | 65,536 |
+| Executions | 54,957 | 54,957 | 54,957 |
+
+The dominant cost was the OMS `client_id` linear scan per submit —
+O(orders) per order, O(n^2) overall. Fixed with an open-addressing
+FNV-1a hash index (`client_id -> orders[] slot`, power-of-two capacity
+>= 2x order cap; orders are never removed so no deletion needed). A
+second identical index on `venue_order_id` was added for the
+ACK/EXEC dispatch path — lookups are now O(1) but throughput is
+unchanged, proving the remaining cost is elsewhere.
+
+Journal I/O is NOT the bottleneck either: `--nojournal` yields ~6,119
+events/sec vs ~5,951 with journal (~3% delta). The residual ~160us/event
+is per-event struct copying (`ts_order` ~300B, `ts_venue_event` ~450B
+memcpy per dispatch), risk/position scans, and venue event-queue churn —
+the price of the safe, allocation-free, correctness-first design. Real
+HFT latency work (lock-free queues, zero-copy dispatch, kernel bypass)
+remains gated on profiling this path under realistic load.
+
+`oms_find_venue`/`find_by_venue` are now hash-indexed; no linear order
+lookups remain on hot paths.
+
+Reproduce: `./build/trading_bench --events 100000`
+
+Virtual-clock latency slots report ~0-1ns because all stages run within
+the same synthetic tick; real wall-time distributions require
+`trading_sim live` against a real venue.
+
 ## Current hot path
 
 ```

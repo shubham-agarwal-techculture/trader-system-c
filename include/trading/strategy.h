@@ -43,6 +43,20 @@ typedef struct {
 
 strategy_t *strategy_momentum_create(const momentum_config *cfg);
 
+/* Book-imbalance strategy: trades top-of-book depth imbalance on
+ * TS_MKT_BOOK events. imbalance = (bid_qty - ask_qty) / total;
+ * > +threshold -> BUY, < -threshold -> SELL (IOC market orders). */
+typedef struct {
+    char instrument[TS_MAX_CODE];
+    char strategy_name[TS_MAX_NAME];
+    double qty;
+    double imbalance_threshold; /* (0,1]; default 0.3 */
+    ts_order_sink sink;
+    void *sink_ctx;
+} bookimb_config;
+
+strategy_t *strategy_book_imbalance_create(const bookimb_config *cfg);
+
 /* Replay adapter: reads normalized market events from a simple text file.
  * Line formats:
  *   QUOTE <instrument> <bid> <ask> [last] [ts_ns] [seq]

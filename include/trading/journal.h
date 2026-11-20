@@ -47,6 +47,10 @@ void journal_close(journal_t *j);
 void journal_set_flush(journal_t *j, bool flush);
 void journal_set_fsync(journal_t *j, bool fsync);
 
+/* Rotation: when the file exceeds max_bytes at open time, it is renamed
+ * to "<path>.1" (replacing any existing .1) before appending. 0 = off. */
+void journal_set_max_bytes(journal_t *j, int64_t max_bytes);
+
 ts_status journal_append_snap(journal_t *j, const ts_order *o);
 ts_status journal_append_exec(journal_t *j, const ts_execution *e);
 ts_status journal_append_risk(journal_t *j, ts_ts_ns ts_ns,

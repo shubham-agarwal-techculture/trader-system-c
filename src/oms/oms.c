@@ -2,6 +2,7 @@
 
 #include "trading/log.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -20,7 +21,74 @@ struct oms {
     char seen_exec[OMS_EXEC_DEDUP_SIZE][TS_MAX_ID];
     size_t seen_next;
     size_t seen_count;
+    /* Open-addressing index: client_id -> orders[] index+1 (0 = empty).
+     * Power-of-two capacity >= 2x order capacity; orders are never
+     * removed so no deletion is needed. */
+    uint32_t *id_hash;
+    /* Same scheme keyed on venue_order_id; entries added lazily when a
+     * venue id is first assigned (ACK) or restored with one. */
+    uint32_t *vid_hash;
+    size_t hash_mask;
 };
+
+static uint32_t hash_client_id(const char *s)
+{
+    uint32_t h = 2166136261u;
+    while (*s) {
+        h ^= (unsigned char)*s++;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void id_hash_insert(oms_t *o, size_t idx)
+{
+    uint32_t h = hash_client_id(o->orders[idx].client_id) & (uint32_t)o->hash_mask;
+    while (o->id_hash[h] != 0) {
+        h = (h + 1) & (uint32_t)o->hash_mask;
+    }
+    o->id_hash[h] = (uint32_t)idx + 1;
+}
+
+static size_t hash_str_find(const oms_t *o, const uint32_t *tab,
+                            const char *key)
+{
+    uint32_t h = hash_client_id(key) & (uint32_t)o->hash_mask;
+    while (tab[h] != 0) {
+        size_t idx = tab[h] - 1;
+        const char *stored = idx < o->count
+            ? (tab == o->id_hash ? o->orders[idx].client_id
+                                 : o->orders[idx].venue_order_id)
+            : "";
+        if (strcmp(stored, key) == 0) {
+            return idx;
+        }
+        h = (h + 1) & (uint32_t)o->hash_mask;
+    }
+    return SIZE_MAX;
+}
+
+static void vid_hash_insert(oms_t *o, size_t idx)
+{
+    const char *key = o->orders[idx].venue_order_id;
+    if (!key[0]) {
+        return;
+    }
+    /* avoid duplicates if already indexed (e.g. restore overwrite) */
+    if (hash_str_find(o, o->vid_hash, key) != SIZE_MAX) {
+        return;
+    }
+    uint32_t h = hash_client_id(key) & (uint32_t)o->hash_mask;
+    while (o->vid_hash[h] != 0) {
+        h = (h + 1) & (uint32_t)o->hash_mask;
+    }
+    o->vid_hash[h] = (uint32_t)idx + 1;
+}
+
+static size_t id_hash_find(const oms_t *o, const char *client_id)
+{
+    return hash_str_find(o, o->id_hash, client_id);
+}
 
 static bool exec_id_seen(oms_t *o, const char *exec_id)
 {
@@ -66,6 +134,21 @@ oms_t *oms_create(const oms_config *cfg, size_t capacity)
     o->journal = cfg->journal;
     o->metrics = cfg->metrics;
     o->clock = cfg->clock;
+    /* hash capacity: pow2 >= 2*capacity, min 16 */
+    size_t hc = 16;
+    while (hc < capacity * 2) {
+        hc *= 2;
+    }
+    o->id_hash = calloc(hc, sizeof(uint32_t));
+    o->vid_hash = calloc(hc, sizeof(uint32_t));
+    if (!o->id_hash || !o->vid_hash) {
+        free(o->id_hash);
+        free(o->vid_hash);
+        free(o->orders);
+        free(o);
+        return NULL;
+    }
+    o->hash_mask = hc - 1;
     return o;
 }
 
@@ -74,18 +157,16 @@ void oms_destroy(oms_t *o)
     if (!o) {
         return;
     }
+    free(o->vid_hash);
+    free(o->id_hash);
     free(o->orders);
     free(o);
 }
 
 static ts_order *find_by_client(oms_t *o, const char *client_id)
 {
-    for (size_t i = 0; i < o->count; ++i) {
-        if (strcmp(o->orders[i].client_id, client_id) == 0) {
-            return &o->orders[i];
-        }
-    }
-    return NULL;
+    size_t idx = id_hash_find(o, client_id);
+    return idx == SIZE_MAX ? NULL : &o->orders[idx];
 }
 
 static ts_order *find_by_venue(oms_t *o, const char *venue_order_id)
@@ -93,32 +174,23 @@ static ts_order *find_by_venue(oms_t *o, const char *venue_order_id)
     if (!venue_order_id || !venue_order_id[0]) {
         return NULL;
     }
-    for (size_t i = 0; i < o->count; ++i) {
-        if (strcmp(o->orders[i].venue_order_id, venue_order_id) == 0) {
-            return &o->orders[i];
-        }
-    }
-    return NULL;
+    size_t idx = hash_str_find(o, o->vid_hash, venue_order_id);
+    return idx == SIZE_MAX ? NULL : &o->orders[idx];
 }
 
 const ts_order *oms_find(const oms_t *o, const char *client_id)
 {
-    for (size_t i = 0; i < o->count; ++i) {
-        if (strcmp(o->orders[i].client_id, client_id) == 0) {
-            return &o->orders[i];
-        }
-    }
-    return NULL;
+    size_t idx = id_hash_find(o, client_id);
+    return idx == SIZE_MAX ? NULL : &o->orders[idx];
 }
 
 const ts_order *oms_find_venue(const oms_t *o, const char *venue_order_id)
 {
-    for (size_t i = 0; i < o->count; ++i) {
-        if (strcmp(o->orders[i].venue_order_id, venue_order_id) == 0) {
-            return &o->orders[i];
-        }
+    if (!venue_order_id || !venue_order_id[0]) {
+        return NULL;
     }
-    return NULL;
+    size_t idx = hash_str_find(o, o->vid_hash, venue_order_id);
+    return idx == SIZE_MAX ? NULL : &o->orders[idx];
 }
 
 const ts_order *oms_at(const oms_t *o, size_t idx)
@@ -244,6 +316,7 @@ ts_status oms_submit(oms_t *o, const ts_order_request *req, ts_order *out)
     ord->state = TS_ORD_NEW;
     ord->created_ns = now_ns(o);
     ord->updated_ns = ord->created_ns;
+    id_hash_insert(o, o->count - 1);
 
     persist_snap(o, ord);
     ts_metrics_inc(o->metrics, TS_MET_ORDERS_SUBMITTED, 1);
@@ -285,8 +358,12 @@ ts_status oms_on_ack(oms_t *o, const char *client_id,
         return TS_ERR_NOT_FOUND;
     }
     if (venue_order_id && venue_order_id[0]) {
+        bool had_id = ord->venue_order_id[0] != '\0';
         ts_copy_str(ord->venue_order_id, sizeof(ord->venue_order_id),
                     venue_order_id);
+        if (!had_id) {
+            vid_hash_insert(o, (size_t)(ord - o->orders));
+        }
     }
     ts_metrics_inc(o->metrics, TS_MET_VENUE_ACKS, 1);
     return set_state(o, ord, TS_ORD_WORKING, NULL);
@@ -420,12 +497,20 @@ ts_status oms_restore_order(oms_t *o, const ts_order *snapshot)
     if (existing) {
         /* Snapshots are replayed in journal order; later wins. */
         *existing = *snapshot;
+        if (snapshot->venue_order_id[0]) {
+            vid_hash_insert(o, (size_t)(existing - o->orders));
+        }
         return TS_OK;
     }
     if (o->count >= o->cap) {
         return TS_ERR_FULL;
     }
-    o->orders[o->count++] = *snapshot;
+    o->orders[o->count] = *snapshot;
+    id_hash_insert(o, o->count);
+    if (snapshot->venue_order_id[0]) {
+        vid_hash_insert(o, o->count);
+    }
+    o->count++;
     return TS_OK;
 }
 

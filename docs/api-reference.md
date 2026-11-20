@@ -156,6 +156,11 @@ strategy_t *strategy_momentum_create(const momentum_config*);
 // momentum_config: instrument, strategy_name, qty, move_threshold,
 //                  direction state, sink callback + ctx
 
+strategy_t *strategy_book_imbalance_create(const bookimb_config*);
+// bookimb_config: instrument, strategy_name, qty, imbalance_threshold,
+//                 sink + ctx — trades top-of-book depth imbalance on
+//                 TS_MKT_BOOK events
+
 replay_t *replay_open(path);
 ts_status replay_next(replay_t*, ts_mkt_event*);  // TS_ERR_NOT_FOUND = EOF
 ```

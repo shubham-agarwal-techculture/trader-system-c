@@ -31,8 +31,12 @@ set(TRADING_SOURCES
     src/ems/venue_mock.c
     src/ems/venue_replay.c
     src/ems/venue_dummy.c
+    src/ems/venue_kraken.c
+    src/ems/kraken_http.c
+    src/ems/kraken_crypto.c
     src/strategy/replay.c
     src/strategy/momentum.c
+    src/strategy/book_imbalance.c
 )
 
 add_library(trading STATIC ${TRADING_SOURCES})
@@ -40,10 +44,15 @@ target_include_directories(trading PUBLIC include)
 
 if(NOT MSVC)
     target_link_libraries(trading PUBLIC m)
+else()
+    target_link_libraries(trading PUBLIC winhttp)
 endif()
 
 add_executable(trading_sim src/app/main.c)
 target_link_libraries(trading_sim PRIVATE trading)
+
+add_executable(trading_bench src/app/bench.c)
+target_link_libraries(trading_bench PRIVATE trading)
 
 enable_testing()
 

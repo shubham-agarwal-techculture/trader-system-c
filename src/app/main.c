@@ -14,6 +14,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#  include <windows.h>
+#else
+#  include <time.h>
+#endif
 
 /* Pipeline context shared by the strategy order sink. */
 typedef struct {
@@ -99,8 +104,9 @@ static void usage(const char *prog)
     fprintf(stderr,
         "Usage:\n"
         "  %s run --journal FILE --replay FILE [--instrument CODE] [--config FILE] [--venue-script FILE]\n"
+        "  %s live --journal FILE --config FILE [--instrument CODE] [--duration-s N] [--interval-ms N]\n"
         "  %s recover --journal FILE\n",
-        prog, prog);
+        prog, prog, prog);
 }
 
 static int cmd_run(const char *journal_path, const char *replay_path,
@@ -131,6 +137,8 @@ static int cmd_run(const char *journal_path, const char *replay_path,
             ts_config_get_bool(cfg, "journal", "fsync", false));
         journal_set_flush(journal,
             ts_config_get_bool(cfg, "journal", "flush", true));
+        journal_set_max_bytes(journal,
+            ts_config_get_i64(cfg, "journal", "max_size_mb", 0) * 1048576LL);
     }
 
     ts_vclock vclock = {0};
@@ -162,7 +170,20 @@ static int cmd_run(const char *journal_path, const char *replay_path,
         }
     }
     if (!venue) {
-        if (strcmp(vtype, "dummy") == 0) {
+        if (strcmp(vtype, "kraken") == 0) {
+            /* Credentials come from environment only — never config
+             * files, journal, or logs. */
+            const char *kkey = getenv("KRAKEN_API_KEY");
+            const char *ksec = getenv("KRAKEN_API_SECRET");
+            if (kkey && ksec && kkey[0] && ksec[0]) {
+                venue = venue_kraken_create(kkey, ksec, &metrics, clock);
+            } else {
+                ts_log(TS_LOG_ERROR,
+                       "venue=kraken requires KRAKEN_API_KEY and "
+                       "KRAKEN_API_SECRET env vars");
+                return 1;
+            }
+        } else if (strcmp(vtype, "dummy") == 0) {
             venue = venue_dummy_create(&metrics, clock);
             if (venue && cfg) {
                 venue_dummy_set_latency_ns(
@@ -240,7 +261,25 @@ static int cmd_run(const char *journal_path, const char *replay_path,
     }
     mcfg.sink = order_sink;
     mcfg.sink_ctx = &pipe;
-    strategy_t *strat = strategy_momentum_create(&mcfg);
+    const char *sname = cfg
+        ? ts_config_get(cfg, "strategy", "name", "momentum")
+        : "momentum";
+    strategy_t *strat = NULL;
+    if (strcmp(sname, "book_imbalance") == 0) {
+        bookimb_config bcfg;
+        memset(&bcfg, 0, sizeof(bcfg));
+        ts_copy_str(bcfg.instrument, sizeof(bcfg.instrument), mcfg.instrument);
+        ts_copy_str(bcfg.strategy_name, sizeof(bcfg.strategy_name),
+                    mcfg.strategy_name[0] ? mcfg.strategy_name : "book_imbalance");
+        bcfg.qty = mcfg.qty;
+        bcfg.imbalance_threshold =
+            ts_config_get_double(cfg, "strategy", "imbalance_threshold", 0.3);
+        bcfg.sink = order_sink;
+        bcfg.sink_ctx = &pipe;
+        strat = strategy_book_imbalance_create(&bcfg);
+    } else {
+        strat = strategy_momentum_create(&mcfg);
+    }
 
     ts_mkt_event ev;
     size_t events = 0, orders_before = oms_count(oms);
@@ -278,6 +317,158 @@ static int cmd_run(const char *journal_path, const char *replay_path,
     if (strat) strat->destroy(strat);
     ts_seqwatch_destroy(seqwatch);
     replay_close(replay);
+    ems_destroy(ems);
+    venue->ops->destroy(venue);
+    rms_destroy(rms);
+    oms_destroy(oms);
+    journal_close(journal);
+    if (cfg) ts_config_free(cfg);
+    return 0;
+}
+
+static void sleep_ms(int ms)
+{
+#if defined(_WIN32)
+    Sleep((DWORD)ms);
+#else
+    struct timespec ts = {.tv_sec = ms / 1000,
+                          .tv_nsec = (long)(ms % 1000) * 1000000L};
+    nanosleep(&ts, NULL);
+#endif
+}
+
+/* Live mode: pull market data from the configured venue (kraken) and
+ * run the same OMS/RMS/EMS pipeline as replay. Real orders reach the
+ * exchange — [live] enabled + credentials are mandatory. */
+static int cmd_live(const char *journal_path, const char *instrument,
+                    const char *config_path, int duration_s, int interval_ms)
+{
+    ts_metrics metrics;
+    ts_metrics_init(&metrics);
+
+    ts_config *cfg = NULL;
+    if (config_path) {
+        cfg = ts_config_load(config_path);
+        if (!cfg) {
+            ts_log(TS_LOG_ERROR, "cannot load config %s", config_path);
+            return 1;
+        }
+        ts_log(TS_LOG_INFO, "loaded config %s", config_path);
+    }
+
+    /* Live mode requires the live gate explicitly. */
+    if (!cfg || !ts_config_get_bool(cfg, "live", "enabled", false)) {
+        ts_log(TS_LOG_ERROR,
+               "live mode requires [live] enabled = true in config");
+        return 1;
+    }
+
+    journal_t *journal = journal_open_append(journal_path);
+    if (!journal) {
+        ts_log(TS_LOG_ERROR, "cannot open journal %s", journal_path);
+        return 1;
+    }
+    if (cfg) {
+        journal_set_fsync(journal,
+            ts_config_get_bool(cfg, "journal", "fsync", false));
+        journal_set_flush(journal,
+            ts_config_get_bool(cfg, "journal", "flush", true));
+        journal_set_max_bytes(journal,
+            ts_config_get_i64(cfg, "journal", "max_size_mb", 0) * 1048576LL);
+    }
+
+    ts_clock clock = ts_clock_mono();
+    ts_vclock vclock = {clock.now_ns(clock.ctx)};
+
+    oms_config ocfg = {.journal = journal, .metrics = &metrics, .clock = clock};
+    oms_t *oms = oms_create(&ocfg, 4096);
+    rms_config rcfg = {.journal = journal, .metrics = &metrics, .clock = clock};
+    rms_t *rms = rms_create(&rcfg);
+    ts_risk_limits lim;
+    ts_risk_limits_default(&lim);
+    if (cfg) ts_config_apply_risk(cfg, &lim);
+    rms_set_limits(rms, &lim);
+
+    /* Live mode currently supports the kraken venue only. */
+    venue_t *venue = NULL;
+    const char *kkey = getenv("KRAKEN_API_KEY");
+    const char *ksec = getenv("KRAKEN_API_SECRET");
+    if (!kkey || !ksec || !kkey[0] || !ksec[0]) {
+        ts_log(TS_LOG_ERROR,
+               "live mode requires KRAKEN_API_KEY and KRAKEN_API_SECRET");
+        return 1;
+    }
+    venue = venue_kraken_create(kkey, ksec, &metrics, clock);
+    if (!venue) {
+        ts_log(TS_LOG_ERROR, "failed to create kraken venue");
+        return 1;
+    }
+    ts_log(TS_LOG_INFO, "live mode: venue=kraken instrument=%s "
+           "interval=%dms duration=%ds", instrument, interval_ms,
+           duration_s);
+
+    ems_config ecfg = {.venue = venue, .oms = oms, .rms = rms,
+                       .metrics = &metrics, .clock = clock};
+    ems_t *ems = ems_create(&ecfg);
+    ts_seqwatch *seqwatch = ts_seqwatch_create(&metrics);
+
+    pipeline_t pipe = {.oms = oms, .rms = rms, .ems = ems,
+                       .metrics = &metrics, .vclock = &vclock};
+    momentum_config mcfg;
+    memset(&mcfg, 0, sizeof(mcfg));
+    ts_copy_str(mcfg.instrument, sizeof(mcfg.instrument), instrument);
+    mcfg.qty = 0.5;
+    mcfg.move_threshold = 0.5;
+    if (cfg) {
+        ts_copy_str(mcfg.instrument, sizeof(mcfg.instrument),
+                    ts_config_get(cfg, "strategy", "instrument",
+                                  mcfg.instrument));
+        mcfg.qty = ts_config_get_double(cfg, "strategy", "qty", 0.5);
+        mcfg.move_threshold =
+            ts_config_get_double(cfg, "strategy", "move_threshold", 0.5);
+    }
+    mcfg.sink = order_sink;
+    mcfg.sink_ctx = &pipe;
+    strategy_t *strat = strategy_momentum_create(&mcfg);
+
+    ts_mkt_event ev;
+    size_t events = 0;
+    int elapsed = 0;
+    while (duration_s <= 0 || elapsed < duration_s * 1000) {
+        ts_status st = venue_kraken_get_ticker(venue,
+            mcfg.instrument[0] ? mcfg.instrument : instrument,
+            &ev, clock);
+        if (st == TS_OK) {
+            events++;
+            vclock.now = ev.ts_ns;
+            ts_metrics_inc(&metrics, TS_MET_MKT_EVENTS, 1);
+            ts_seqwatch_on_event(seqwatch, &ev);
+            rms_on_quote(rms, ev.instrument, ev.bid, ev.ask, ev.last,
+                         ev.ts_ns);
+            ems_on_market_event(ems, &ev);
+            if (strat && strat->on_event) {
+                strat->on_event(strat, &ev);
+            }
+        } else {
+            ts_metrics_inc(&metrics, TS_MET_MKT_STALE, 1);
+        }
+        ems_poll(ems);
+        sleep_ms(interval_ms);
+        elapsed += interval_ms;
+    }
+
+    ts_recon_report rep;
+    if (ems_reconcile(ems, &rep) == TS_OK) {
+        printf("reconcile: oms_open=%zu venue_open=%zu matched=%zu "
+               "oms_only=%zu venue_only=%zu\n",
+               rep.oms_open, rep.venue_open, rep.matched,
+               rep.oms_only, rep.venue_only);
+    }
+    printf("live session: %zu market events\n", events);
+    ts_metrics_dump(&metrics);
+
+    if (strat) strat->destroy(strat);
+    ts_seqwatch_destroy(seqwatch);
     ems_destroy(ems);
     venue->ops->destroy(venue);
     rms_destroy(rms);
@@ -339,6 +530,8 @@ int main(int argc, char **argv)
     const char *instrument = NULL;
     const char *config_path = NULL;
     const char *venue_script = NULL;
+    int duration_s = 0;
+    int interval_ms = 1000;
 
     for (int i = 2; i < argc; ++i) {
         if (strcmp(argv[i], "--journal") == 0 && i + 1 < argc) {
@@ -351,6 +544,10 @@ int main(int argc, char **argv)
             config_path = argv[++i];
         } else if (strcmp(argv[i], "--venue-script") == 0 && i + 1 < argc) {
             venue_script = argv[++i];
+        } else if (strcmp(argv[i], "--duration-s") == 0 && i + 1 < argc) {
+            duration_s = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--interval-ms") == 0 && i + 1 < argc) {
+            interval_ms = atoi(argv[++i]);
         }
     }
 
@@ -365,6 +562,15 @@ int main(int argc, char **argv)
         }
         return cmd_run(journal_path, replay_path, instrument, config_path,
                        venue_script);
+    }
+    if (strcmp(cmd, "live") == 0) {
+        if (!config_path) {
+            usage(argv[0]);
+            return 2;
+        }
+        return cmd_live(journal_path,
+                        instrument ? instrument : "BTCUSDT",
+                        config_path, duration_s, interval_ms);
     }
     if (strcmp(cmd, "recover") == 0) {
         return cmd_recover(journal_path);

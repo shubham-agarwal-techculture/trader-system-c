@@ -84,6 +84,14 @@ void venue_dummy_set_reject_every(venue_t *v, int n);
 void venue_dummy_set_max_orders_per_sec(venue_t *v, double n);
 void venue_dummy_set_connected(venue_t *v, bool connected);
 
+/* Kraken spot adapter (REST mode): real exchange connectivity via
+ * WinHTTP. Requires API credentials; market data via
+ * venue_kraken_get_ticker(). No amend support (Kraken lacks it). */
+venue_t *venue_kraken_create(const char *api_key, const char *api_secret,
+                             ts_metrics *metrics, ts_clock clock);
+ts_status venue_kraken_get_ticker(venue_t *v, const char *instrument,
+                                  ts_mkt_event *out, ts_clock clock);
+
 #ifdef __cplusplus
 }
 #endif

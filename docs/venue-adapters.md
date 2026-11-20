@@ -60,6 +60,31 @@ EXPIRED  <client_id> [reason...]
 UNKNOWN  <client_id> [reason...]
 ```
 
+### kraken — `src/ems/venue_kraken.c` (REAL, REST mode)
+
+First real exchange adapter — Kraken spot via WinHTTP (Windows-native
+HTTPS, no external TLS/WS dependency).
+
+- **Order entry**: `AddOrder` / `CancelOrder` / `CancelAllOrders` (POST,
+  `API-Key` + `API-Sign` headers)
+- **Executions**: `TradesHistory` diffed by trade id inside `poll()`
+  (250ms throttle) -> `EXEC` events
+- **Reconciliation**: `OpenOrders` REST -> `open_orders` op
+- **Market data**: `venue_kraken_get_ticker()` (public `Ticker` endpoint,
+  no auth) — wired into the feed loop by the live runner
+- **Auth**: `KRAKEN_API_KEY` / `KRAKEN_API_SECRET` env vars only — never
+  config files, journal, or logs
+- **Pair mapping**: `BTCUSDT`->`XBTUSD`, `ETHUSDT`->`ETHUSD`, others pass
+  through
+- **No amend**: Kraken lacks amend/replace; `amend` op is NULL (EMS
+  returns `TS_ERR_BAD_STATE`) — use cancel + resubmit
+- **Transport failure** on submit/cancel -> `UNKNOWN` event (never
+  blind-retry), per the uncertain-outcome rule
+- Crypto: self-contained SHA-256/HMAC/base64 (`kraken_crypto.c`); HTTP:
+  WinHTTP (`kraken_http.c`, non-Windows stubbed)
+
+Config: `[venue] type = kraken` + `[live] enabled = true` + env creds.
+
 ### dummy — `src/ems/venue_dummy.c`
 
 Realistic simulated venue for exercising the live-order path:
@@ -80,7 +105,7 @@ position or adverse selection — plumbing verification only.
 
 ```ini
 [venue]
-type = mock | replay | dummy    # default: mock
+type = mock | replay | dummy | kraken   # default: mock
 reject_all = false              # mock only
 script = venue.txt              # replay only
 latency_ns = 0                  # dummy only
