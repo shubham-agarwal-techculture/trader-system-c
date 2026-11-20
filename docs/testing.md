@@ -11,6 +11,7 @@ tests/
   test_ems.c      — venue events -> OMS/RMS, mock venue semantics
   test_journal.c  — journal round-trip + crash recovery
   test_pipeline.c — end-to-end replay + journal recovery equivalence
+  test_hardening.c — config, seqwatch, exec dedup, reconcile, replay venue
   test_main.c     — aggregates suites
 ```
 
@@ -49,6 +50,13 @@ ctest --test-dir build --output-on-failure   # or ./build/trading_tests
 | Journal round-trip | `journal:journal_write_read` |
 | Crash/restart recovery | `journal:recovery_rebuilds_state`, `pipeline:journal_recovers_pipeline_state` |
 | End-to-end deterministic replay | `pipeline:end_to_end_replay` |
+| Config load + risk apply | `hardening:config_load_and_get` |
+| Feed seq-gap detection | `hardening:seqwatch_gaps` |
+| Exec dedup by venue_exec_id | `hardening:exec_dedup` |
+| Venue reconciliation | `hardening:reconcile_matched_and_breaks` |
+| Scripted venue events (dup exec, reject) | `hardening:replay_venue_scripted_events` |
+| Replay venue open_orders | `hardening:replay_venue_open_orders` |
+| Journal flush/fsync | `hardening:journal_flush_and_fsync` |
 
 ## Replay format (fixtures + tests)
 

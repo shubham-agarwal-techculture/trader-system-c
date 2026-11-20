@@ -20,6 +20,8 @@ set(TRADING_SOURCES
     src/core/clock.c
     src/core/log.c
     src/core/events.c
+    src/core/config.c
+    src/core/seqwatch.c
     src/observability/metrics.c
     src/persistence/journal.c
     src/persistence/journal_replay.c
@@ -27,6 +29,7 @@ set(TRADING_SOURCES
     src/rms/rms.c
     src/ems/ems.c
     src/ems/venue_mock.c
+    src/ems/venue_replay.c
     src/strategy/replay.c
     src/strategy/momentum.c
 )
@@ -51,6 +54,7 @@ add_executable(trading_tests
     tests/test_ems.c
     tests/test_journal.c
     tests/test_pipeline.c
+    tests/test_hardening.c
     tests/test_main.c
 )
 target_include_directories(trading_tests PRIVATE tests)

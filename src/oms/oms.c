@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define OMS_EXEC_DEDUP_SIZE 4096
+
 struct oms {
     ts_order *orders;
     size_t cap;
@@ -12,7 +14,34 @@ struct oms {
     journal_t *journal;
     ts_metrics *metrics;
     ts_clock clock;
+    /* Ring of recently seen venue_exec_ids for duplicate suppression.
+     * seen_next is the next write position; the seen_count most recent
+     * entries ending at seen_next are valid. */
+    char seen_exec[OMS_EXEC_DEDUP_SIZE][TS_MAX_ID];
+    size_t seen_next;
+    size_t seen_count;
 };
+
+static bool exec_id_seen(oms_t *o, const char *exec_id)
+{
+    for (size_t k = 0; k < o->seen_count; ++k) {
+        size_t idx = (o->seen_next + OMS_EXEC_DEDUP_SIZE - o->seen_count + k) %
+                     OMS_EXEC_DEDUP_SIZE;
+        if (strcmp(o->seen_exec[idx], exec_id) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void exec_id_remember(oms_t *o, const char *exec_id)
+{
+    ts_copy_str(o->seen_exec[o->seen_next], TS_MAX_ID, exec_id);
+    o->seen_next = (o->seen_next + 1) % OMS_EXEC_DEDUP_SIZE;
+    if (o->seen_count < OMS_EXEC_DEDUP_SIZE) {
+        o->seen_count++;
+    }
+}
 
 static ts_ts_ns now_ns(const oms_t *o)
 {
@@ -268,6 +297,16 @@ ts_status oms_on_execution(oms_t *o, const ts_execution *exec)
     if (!o || !exec) {
         return TS_ERR_INVALID_ARG;
     }
+    /* Duplicate execution suppression by venue exec id. Executions
+     * without a venue id (e.g. tests) are not deduplicated. */
+    if (exec->venue_exec_id[0] != '\0') {
+        if (exec_id_seen(o, exec->venue_exec_id)) {
+            ts_metrics_inc(o->metrics, TS_MET_EXEC_DUPLICATE, 1);
+            return TS_OK;
+        }
+        exec_id_remember(o, exec->venue_exec_id);
+    }
+
     ts_order *ord = find_by_client(o, exec->client_id);
     if (!ord && exec->venue_order_id[0]) {
         ord = find_by_venue(o, exec->venue_order_id);

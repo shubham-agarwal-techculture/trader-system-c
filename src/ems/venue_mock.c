@@ -356,6 +356,36 @@ static bool mock_connected(venue_t *v)
     return m->connected;
 }
 
+static ts_status mock_open_orders(venue_t *v, ts_venue_open_order *out,
+                                  size_t cap, size_t *count)
+{
+    struct mock_venue_impl *m = v->impl;
+    if (!m->connected) {
+        return TS_ERR_BAD_STATE;
+    }
+    size_t n = 0;
+    for (size_t i = 0; i < m->working_count && n < cap; ++i) {
+        const mock_working *w = &m->working[i];
+        if (w->ord.filled_qty >= w->ord.qty - 1e-12) {
+            continue; /* fully filled orders are not "open" */
+        }
+        ts_venue_open_order *oo = &out[n++];
+        memset(oo, 0, sizeof(*oo));
+        ts_copy_str(oo->client_id, sizeof(oo->client_id), w->ord.client_id);
+        ts_copy_str(oo->venue_order_id, sizeof(oo->venue_order_id),
+                    w->ord.venue_order_id);
+        ts_copy_str(oo->instrument, sizeof(oo->instrument), w->ord.instrument);
+        oo->side = w->ord.side;
+        oo->qty = w->ord.qty;
+        oo->filled_qty = w->ord.filled_qty;
+        oo->price = w->ord.price;
+    }
+    if (count) {
+        *count = n;
+    }
+    return TS_OK;
+}
+
 static void mock_destroy(venue_t *v)
 {
     if (!v) {
@@ -372,6 +402,7 @@ static const venue_ops_t g_mock_ops = {
     .on_market_event = mock_on_market_event,
     .poll = mock_poll,
     .connected = mock_connected,
+    .open_orders = mock_open_orders,
     .destroy = mock_destroy,
 };
 

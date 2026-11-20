@@ -19,6 +19,7 @@ void test_fail(const char *file, int line, const char *expr)
 void test_run_suite(const char *suite, const test_case *tests)
 {
     printf("[%s]\n", suite);
+    fflush(stdout);
     for (size_t i = 0; tests[i].name; ++i) {
         g_test_current = tests[i].name;
         if (setjmp(g_test_jmp) == 0) {
@@ -27,6 +28,7 @@ void test_run_suite(const char *suite, const test_case *tests)
         } else {
             printf("  FAIL %s\n", tests[i].name);
         }
+        fflush(stdout);
     }
 }
 

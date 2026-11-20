@@ -19,10 +19,13 @@ Implemented (Phases 0–2 of the plan):
 - Persistence: append-only journal with replay-based recovery
 - Strategy: replay feed adapter + reference momentum strategy
 - `trading_sim` CLI and a CTest unit/integration suite
+- INI config loader (`--config`), feed sequence-gap detection, journal
+  flush/fsync durability, latency percentiles, exec dedup, venue
+  reconciliation (`ems_reconcile`), and a scripted ReplayVenue adapter
 
-Not yet implemented (later phases): real exchange/broker adapters,
-network transports, co-location/kernel-bypass, production session
-handling, and live-trading enablement.
+Not yet implemented (later phases): real exchange/broker network adapters
+(TLS/WebSocket dependency decision required), co-location/kernel-bypass,
+production session handling, and live-trading enablement.
 
 ## Build
 
@@ -39,6 +42,10 @@ ctest --test-dir build --output-on-failure
 ```sh
 ./build/trading_sim run --journal data/journal.log \
     --replay fixtures/sample_feed.txt --instrument BTCUSDT
+
+# With a config file (risk limits, strategy, venue, journal durability):
+./build/trading_sim run --journal data/journal.log \
+    --replay fixtures/sample_feed.txt --config sim.cfg
 
 # Rebuild OMS/RMS state from the journal:
 ./build/trading_sim recover --journal data/journal.log

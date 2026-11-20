@@ -47,6 +47,22 @@ bool ems_venue_connected(ems_t *e);
 /* Reconciliation support: mark orders whose venue state is uncertain. */
 ts_status ems_mark_unknown(ems_t *e, const char *client_id, const char *reason);
 
+/* Reconcile OMS open orders against the venue's open-order list.
+ * Orders the OMS believes are working but the venue doesn't report are
+ * marked TS_ORD_UNKNOWN. Orders the venue reports that the OMS doesn't
+ * know are counted as breaks. Requires venue->ops->open_orders;
+ * returns TS_ERR_BAD_STATE if the venue doesn't support the query. */
+typedef struct {
+    size_t oms_open;     /* OMS orders in WORKING/PARTIAL */
+    size_t venue_open;   /* orders reported by venue */
+    size_t matched;
+    size_t oms_only;     /* OMS open but absent at venue -> marked UNKNOWN */
+    size_t venue_only;   /* venue open but unknown to OMS */
+    bool supported;
+} ts_recon_report;
+
+ts_status ems_reconcile(ems_t *e, ts_recon_report *report);
+
 #ifdef __cplusplus
 }
 #endif

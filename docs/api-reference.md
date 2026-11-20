@@ -163,6 +163,78 @@ ts_status replay_next(replay_t*, ts_mkt_event*);  // TS_ERR_NOT_FOUND = EOF
 `TS_MET_CANCELS`, `TS_MET_RECON_BREAKS`. Latency slots 0–4:
 decision/risk/dispatch/ack/fill.
 
+## config.h
+
+INI-style loader (`src/core/config.c`):
+
+```c
+ts_config *ts_config_load(const char *path);
+void ts_config_free(ts_config *c);
+const char *ts_config_get(c, section, key, def);
+double ts_config_get_double(c, section, key, def);
+int64_t ts_config_get_i64(c, section, key, def);
+bool ts_config_get_bool(c, section, key, def);
+ts_status ts_config_apply_risk(c, ts_risk_limits *lim); // [risk] section
+```
+
+Format: `[section]` headers, `key = value`, `#`/`;` comments, max 512
+entries / 64-char keys / 256-char values.
+
+## seqwatch.h
+
+Feed sequence-gap tracking per instrument:
+
+```c
+ts_seqwatch *ts_seqwatch_create(ts_metrics *metrics);
+ts_status ts_seqwatch_on_event(ts_seqwatch*, const ts_mkt_event*);
+const ts_seq_channel *ts_seqwatch_channel(w, instrument);
+```
+
+`seq == 0` events are ignored. Forward jumps count missing seqs into
+`TS_MET_MKT_SEQ_GAPS`; `seq <= last` counts as `dup_or_old`.
+
+## journal.h — durability
+
+```c
+void journal_set_flush(journal_t*, bool);  // fflush per record, default on
+void journal_set_fsync(journal_t*, bool);  // fsync/_commit per record
+```
+
+## venue.h — open_orders + replay venue
+
+`venue_ops_t.open_orders(v, out, cap, &count)` is optional; NULL means
+"reconciliation unavailable". `ts_venue_open_order` carries
+client_id/venue_order_id/instrument/side/qty/filled_qty/price.
+
+`venue_replay_create(path, metrics, clock)` — scripted venue for
+contract/fault tests. Script verbs: `ACK`, `EXEC`, `REJECT`, `CANCEL`,
+`EXPIRED`, `UNKNOWN` (see venue-onboarding.md). No auto-ACK on submit.
+
+## ems.h — reconciliation
+
+```c
+ts_status ems_reconcile(ems_t*, ts_recon_report *report);
+// report: oms_open, venue_open, matched, oms_only, venue_only, supported
+```
+
+OMS orders in WORKING/PARTIAL absent from the venue's open-order list are
+marked `TS_ORD_UNKNOWN`; venue-only orders count as breaks. Requires
+`venue->ops->open_orders`.
+
+## metrics.h — percentiles
+
+`ts_metrics_latency_pct(m, slot, pct)` returns an estimated p-th
+percentile in ns from a log2 histogram (upper-bound estimate).
+`ts_metrics_dump` prints p50/p95/p99 alongside avg/max. New counter:
+`TS_MET_EXEC_DUPLICATE`.
+
+## OMS — exec dedup
+
+`oms_on_execution` suppresses duplicate fills by `venue_exec_id` using a
+4096-entry ring (`TS_MET_EXEC_DUPLICATE`). Executions without a venue exec
+id are not deduplicated. Overfills are clamped and counted as
+`TS_MET_RECON_BREAKS`.
+
 ## log.h
 
 `ts_log_set_level(TS_LOG_TRACE..TS_LOG_ERROR)`, `ts_log(lvl, fmt, ...)`.

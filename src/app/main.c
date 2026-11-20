@@ -1,3 +1,4 @@
+#include "trading/config.h"
 #include "trading/core.h"
 #include "trading/ems.h"
 #include "trading/events.h"
@@ -6,6 +7,7 @@
 #include "trading/metrics.h"
 #include "trading/oms.h"
 #include "trading/rms.h"
+#include "trading/seqwatch.h"
 #include "trading/strategy.h"
 #include "trading/venue.h"
 
@@ -87,22 +89,39 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
         "Usage:\n"
-        "  %s run --journal FILE --replay FILE [--instrument CODE]\n"
-        "  %s recover --journal FILE\n"
-        "  %s metrics-demo --journal FILE --replay FILE\n",
-        prog, prog, prog);
+        "  %s run --journal FILE --replay FILE [--instrument CODE] [--config FILE] [--venue-script FILE]\n"
+        "  %s recover --journal FILE\n",
+        prog, prog);
 }
 
 static int cmd_run(const char *journal_path, const char *replay_path,
-                   const char *instrument_filter)
+                   const char *instrument_filter, const char *config_path,
+                   const char *venue_script)
 {
     ts_metrics metrics;
     ts_metrics_init(&metrics);
+
+    /* Optional config file overrides defaults. */
+    ts_config *cfg = NULL;
+    if (config_path) {
+        cfg = ts_config_load(config_path);
+        if (!cfg) {
+            ts_log(TS_LOG_ERROR, "cannot load config %s", config_path);
+            return 1;
+        }
+        ts_log(TS_LOG_INFO, "loaded config %s", config_path);
+    }
 
     journal_t *journal = journal_open_append(journal_path);
     if (!journal) {
         ts_log(TS_LOG_ERROR, "cannot open journal %s", journal_path);
         return 1;
+    }
+    if (cfg) {
+        journal_set_fsync(journal,
+            ts_config_get_bool(cfg, "journal", "fsync", false));
+        journal_set_flush(journal,
+            ts_config_get_bool(cfg, "journal", "flush", true));
     }
 
     ts_vclock vclock = {0};
@@ -114,7 +133,38 @@ static int cmd_run(const char *journal_path, const char *replay_path,
     rms_config rcfg = {.journal = journal, .metrics = &metrics, .clock = clock};
     rms_t *rms = rms_create(&rcfg);
 
-    venue_t *venue = venue_mock_create(&metrics, clock);
+    ts_risk_limits lim;
+    ts_risk_limits_default(&lim);
+    if (cfg) {
+        ts_config_apply_risk(cfg, &lim);
+    }
+    rms_set_limits(rms, &lim);
+
+    /* Venue selection: replay script takes precedence, else mock. */
+    const char *vtype = cfg ? ts_config_get(cfg, "venue", "type", "mock")
+                            : "mock";
+    venue_t *venue = NULL;
+    if (venue_script || strcmp(vtype, "replay") == 0) {
+        const char *script = venue_script
+            ? venue_script
+            : ts_config_get(cfg, "venue", "script", NULL);
+        if (script) {
+            venue = venue_replay_create(script, &metrics, clock);
+        }
+    }
+    if (!venue) {
+        venue = venue_mock_create(&metrics, clock);
+        if (cfg && venue) {
+            bool reject = ts_config_get_bool(cfg, "venue", "reject_all",
+                                             false);
+            venue_mock_set_reject_all(venue, reject);
+        }
+    }
+    if (!venue) {
+        ts_log(TS_LOG_ERROR, "failed to create venue");
+        return 1;
+    }
+    ts_log(TS_LOG_INFO, "venue: %s", venue_name(venue));
     ems_config ecfg = {
         .venue = venue, .oms = oms, .rms = rms,
         .metrics = &metrics, .journal = journal, .clock = clock,
@@ -130,12 +180,24 @@ static int cmd_run(const char *journal_path, const char *replay_path,
     pipeline_t pipe = {.oms = oms, .rms = rms, .ems = ems,
                        .metrics = &metrics, .vclock = &vclock};
 
+    ts_seqwatch *seqwatch = ts_seqwatch_create(&metrics);
+
     momentum_config mcfg;
     memset(&mcfg, 0, sizeof(mcfg));
     ts_copy_str(mcfg.instrument, sizeof(mcfg.instrument),
                 instrument_filter ? instrument_filter : "BTCUSDT");
     mcfg.qty = 0.5;
     mcfg.move_threshold = 0.5;
+    if (cfg) {
+        ts_copy_str(mcfg.instrument, sizeof(mcfg.instrument),
+                    ts_config_get(cfg, "strategy", "instrument",
+                                  mcfg.instrument));
+        mcfg.qty = ts_config_get_double(cfg, "strategy", "qty", 0.5);
+        mcfg.move_threshold =
+            ts_config_get_double(cfg, "strategy", "move_threshold", 0.5);
+        const char *sname = ts_config_get(cfg, "strategy", "name", "momentum");
+        ts_copy_str(mcfg.strategy_name, sizeof(mcfg.strategy_name), sname);
+    }
     mcfg.sink = order_sink;
     mcfg.sink_ctx = &pipe;
     strategy_t *strat = strategy_momentum_create(&mcfg);
@@ -145,6 +207,7 @@ static int cmd_run(const char *journal_path, const char *replay_path,
     while (replay_next(replay, &ev) == TS_OK) {
         ts_vclock_set(&vclock, ev.ts_ns);
         ts_metrics_inc(&metrics, TS_MET_MKT_EVENTS, 1);
+        ts_seqwatch_on_event(seqwatch, &ev);
 
         rms_on_quote(rms, ev.instrument, ev.bid, ev.ask, ev.last, ev.ts_ns);
         ems_on_market_event(ems, &ev);
@@ -153,6 +216,15 @@ static int cmd_run(const char *journal_path, const char *replay_path,
         }
         ems_poll(ems);
         events++;
+    }
+
+    /* Final reconciliation against venue open-order state. */
+    ts_recon_report rep;
+    if (ems_reconcile(ems, &rep) == TS_OK) {
+        printf("reconcile: oms_open=%zu venue_open=%zu matched=%zu "
+               "oms_only=%zu venue_only=%zu\n",
+               rep.oms_open, rep.venue_open, rep.matched,
+               rep.oms_only, rep.venue_only);
     }
 
     printf("replay complete: %zu market events, %zu orders in OMS\n",
@@ -164,12 +236,14 @@ static int cmd_run(const char *journal_path, const char *replay_path,
     ts_metrics_dump(&metrics);
 
     if (strat) strat->destroy(strat);
+    ts_seqwatch_destroy(seqwatch);
     replay_close(replay);
     ems_destroy(ems);
     venue->ops->destroy(venue);
     rms_destroy(rms);
     oms_destroy(oms);
     journal_close(journal);
+    if (cfg) ts_config_free(cfg);
     return 0;
 }
 
@@ -223,6 +297,8 @@ int main(int argc, char **argv)
     const char *journal_path = NULL;
     const char *replay_path = NULL;
     const char *instrument = NULL;
+    const char *config_path = NULL;
+    const char *venue_script = NULL;
 
     for (int i = 2; i < argc; ++i) {
         if (strcmp(argv[i], "--journal") == 0 && i + 1 < argc) {
@@ -231,6 +307,10 @@ int main(int argc, char **argv)
             replay_path = argv[++i];
         } else if (strcmp(argv[i], "--instrument") == 0 && i + 1 < argc) {
             instrument = argv[++i];
+        } else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+            config_path = argv[++i];
+        } else if (strcmp(argv[i], "--venue-script") == 0 && i + 1 < argc) {
+            venue_script = argv[++i];
         }
     }
 
@@ -243,7 +323,8 @@ int main(int argc, char **argv)
             usage(argv[0]);
             return 2;
         }
-        return cmd_run(journal_path, replay_path, instrument);
+        return cmd_run(journal_path, replay_path, instrument, config_path,
+                       venue_script);
     }
     if (strcmp(cmd, "recover") == 0) {
         return cmd_recover(journal_path);

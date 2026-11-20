@@ -5,9 +5,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#  include <io.h>
+#else
+#  include <unistd.h>
+#endif
+
 struct journal {
     FILE *fp;
     bool writing;
+    bool flush;   /* fflush after every record (default on for append) */
+    bool fsync;   /* fsync/_commit after every record (default off) */
 };
 
 journal_t *journal_open_append(const char *path)
@@ -19,6 +27,8 @@ journal_t *journal_open_append(const char *path)
     if (!fp) {
         return NULL;
     }
+    /* Durability comes from j->flush (fflush per record, on by default)
+     * plus optional fsync — no setvbuf needed. */
     journal_t *j = calloc(1, sizeof(*j));
     if (!j) {
         fclose(fp);
@@ -26,6 +36,7 @@ journal_t *journal_open_append(const char *path)
     }
     j->fp = fp;
     j->writing = true;
+    j->flush = true;
     return j;
 }
 
@@ -71,7 +82,31 @@ static ts_status write_line(journal_t *j, const char *fmt, ...)
     if (n < 0 || fputc('\n', j->fp) == EOF) {
         return TS_ERR_IO;
     }
+    if (j->flush && fflush(j->fp) != 0) {
+        return TS_ERR_IO;
+    }
+    if (j->fsync) {
+#if defined(_WIN32)
+        _commit(_fileno(j->fp));
+#else
+        fsync(fileno(j->fp));
+#endif
+    }
     return TS_OK;
+}
+
+void journal_set_flush(journal_t *j, bool flush)
+{
+    if (j) {
+        j->flush = flush;
+    }
+}
+
+void journal_set_fsync(journal_t *j, bool fsync)
+{
+    if (j) {
+        j->fsync = fsync;
+    }
 }
 
 /* Field order for SNAP lines (tab-separated, doubles via %.17g):

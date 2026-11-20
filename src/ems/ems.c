@@ -169,3 +169,83 @@ ts_status ems_mark_unknown(ems_t *e, const char *client_id, const char *reason)
     }
     return oms_on_unknown(e->oms, client_id, reason);
 }
+
+ts_status ems_reconcile(ems_t *e, ts_recon_report *report)
+{
+    if (!e || !report) {
+        return TS_ERR_INVALID_ARG;
+    }
+    memset(report, 0, sizeof(*report));
+    if (!e->venue->ops->open_orders) {
+        report->supported = false;
+        return TS_ERR_BAD_STATE;
+    }
+    report->supported = true;
+
+    enum { MAX_OPEN = 1024 };
+    /* Heap-allocate: these arrays are ~500KB combined, too large for
+     * small thread stacks. */
+    ts_venue_open_order *venue_orders =
+        malloc(MAX_OPEN * sizeof(*venue_orders));
+    ts_order *oms_orders = malloc(MAX_OPEN * sizeof(*oms_orders));
+    if (!venue_orders || !oms_orders) {
+        free(venue_orders);
+        free(oms_orders);
+        return TS_ERR_NOMEM;
+    }
+    size_t vcount = 0;
+    ts_status st = e->venue->ops->open_orders(e->venue, venue_orders,
+                                             MAX_OPEN, &vcount);
+    if (st != TS_OK) {
+        free(venue_orders);
+        free(oms_orders);
+        return st;
+    }
+    report->venue_open = vcount;
+
+    /* OMS-side open orders (venue-visible states). */
+    size_t ocount = oms_orders_in_state(e->oms, TS_ORD_WORKING, oms_orders,
+                                        MAX_OPEN);
+    ocount += oms_orders_in_state(e->oms, TS_ORD_PARTIAL,
+                                  oms_orders + ocount, MAX_OPEN - ocount);
+    report->oms_open = ocount;
+
+    for (size_t i = 0; i < ocount; ++i) {
+        const char *cid = oms_orders[i].client_id;
+        bool found = false;
+        for (size_t j = 0; j < vcount; ++j) {
+            if (strcmp(venue_orders[j].client_id, cid) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if (found) {
+            report->matched++;
+        } else {
+            report->oms_only++;
+            oms_on_unknown(e->oms, cid, "reconcile: absent at venue");
+            ts_metrics_inc(e->metrics, TS_MET_RECON_BREAKS, 1);
+        }
+    }
+    for (size_t j = 0; j < vcount; ++j) {
+        const char *cid = venue_orders[j].client_id;
+        bool known = false;
+        for (size_t i = 0; i < ocount; ++i) {
+            if (strcmp(oms_orders[i].client_id, cid) == 0) {
+                known = true;
+                break;
+            }
+        }
+        /* Also accept orders in other non-terminal OMS states. */
+        if (!known && oms_find(e->oms, cid) != NULL) {
+            known = true;
+        }
+        if (!known) {
+            report->venue_only++;
+            ts_metrics_inc(e->metrics, TS_MET_RECON_BREAKS, 1);
+        }
+    }
+    free(venue_orders);
+    free(oms_orders);
+    return TS_OK;
+}

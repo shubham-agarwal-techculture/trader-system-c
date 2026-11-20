@@ -41,6 +41,12 @@ journal_t *journal_open_append(const char *path);
 journal_t *journal_open_read(const char *path);
 void journal_close(journal_t *j);
 
+/* Durability controls (append mode only). flush=fflush per record
+ * (default on); fsync=force to stable storage per record (default off,
+ * expensive — enable for live). */
+void journal_set_flush(journal_t *j, bool flush);
+void journal_set_fsync(journal_t *j, bool fsync);
+
 ts_status journal_append_snap(journal_t *j, const ts_order *o);
 ts_status journal_append_exec(journal_t *j, const ts_execution *e);
 ts_status journal_append_risk(journal_t *j, ts_ts_ns ts_ns,

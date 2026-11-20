@@ -8,6 +8,7 @@ extern const test_case rms_tests[];
 extern const test_case ems_tests[];
 extern const test_case journal_tests[];
 extern const test_case pipeline_tests[];
+extern const test_case hardening_tests[];
 
 int main(void)
 {
@@ -17,5 +18,6 @@ int main(void)
     test_run_suite("ems", ems_tests);
     test_run_suite("journal", journal_tests);
     test_run_suite("pipeline", pipeline_tests);
+    test_run_suite("hardening", hardening_tests);
     return test_summary();
 }

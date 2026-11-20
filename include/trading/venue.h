@@ -14,6 +14,17 @@ extern "C" {
 
 typedef struct venue venue_t;
 
+/* Normalized view of an order open at the venue, used for reconciliation. */
+typedef struct {
+    char client_id[TS_MAX_ID];
+    char venue_order_id[TS_MAX_ID];
+    char instrument[TS_MAX_CODE];
+    ts_side side;
+    double qty;
+    double filled_qty;
+    double price;
+} ts_venue_open_order;
+
 typedef struct venue_ops {
     const char *name;
     /* Submit an approved order. Must be idempotent on client_id.
@@ -28,6 +39,11 @@ typedef struct venue_ops {
     ts_status (*poll)(venue_t *v, ts_venue_event *out);
     /* Session/health status. */
     bool (*connected)(venue_t *v);
+    /* Optional: list orders the venue believes are open/working.
+     * Returns TS_OK and fills out/count. NULL if unsupported — callers
+     * must treat that as "reconciliation unavailable", not "no orders". */
+    ts_status (*open_orders)(venue_t *v, ts_venue_open_order *out,
+                             size_t cap, size_t *count);
     void (*destroy)(venue_t *v);
 } venue_ops_t;
 
@@ -45,6 +61,11 @@ static inline const char *venue_name(const venue_t *v)
 venue_t *venue_mock_create(ts_metrics *metrics, ts_clock clock);
 void venue_mock_set_reject_all(venue_t *v, bool reject);
 void venue_mock_set_latency_ns(venue_t *v, ts_ts_ns latency_ns);
+
+/* Replay venue constructor (src/ems/venue_replay.c): replays scripted
+ * venue events from a file for deterministic contract/fault tests. */
+venue_t *venue_replay_create(const char *path, ts_metrics *metrics,
+                             ts_clock clock);
 
 #ifdef __cplusplus
 }
