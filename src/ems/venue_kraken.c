@@ -1,5 +1,6 @@
 #include "trading/venue.h"
 #include "trading/kraken_transport.h"
+#include "trading/kraken_ws.h"
 
 #include "trading/log.h"
 
@@ -7,6 +8,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#if defined(_WIN32)
+#  include <windows.h>
+#  include <winhttp.h>
+#endif
 
 /* Kraken spot adapter — REST mode (no WebSocket yet).
  *
@@ -65,7 +71,21 @@ struct kraken_impl {
     ts_ts_ns last_ticker_ns;
     ts_metrics *metrics;
     ts_clock clock;
+#if defined(_WIN32)
+    /* WebSocket ticker feed: reader thread -> bounded queue -> live loop */
+    void *ws_thread;
+    void *ws_socket;      /* HINTERNET of upgraded WebSocket */
+    CRITICAL_SECTION ws_lock;
+    bool ws_lock_init;
+    ts_mkt_event ws_queue[256];
+    size_t ws_head, ws_tail, ws_count;
+    volatile long ws_stop;
+    volatile long ws_running;
+    char ws_instrument[TS_MAX_CODE];
+#endif
 };
+
+static void kraken_ws_stop(struct kraken_impl *k);
 
 static ts_ts_ns now_ns(struct kraken_impl *k)
 {
@@ -564,7 +584,6 @@ static ts_status kraken_open_orders(venue_t *v, ts_venue_open_order *out,
 {
     struct kraken_impl *k = v->impl;
     if (!k->has_creds) return TS_ERR_BAD_STATE;
-    int status = 0;
     char *body = signed_get(k, "/private/OpenOrders", "");
     if (!body) return TS_ERR_BAD_STATE;
     size_t n = 0;
@@ -617,9 +636,11 @@ static ts_status kraken_open_orders(venue_t *v, ts_venue_open_order *out,
 static void kraken_destroy(venue_t *v)
 {
     if (!v) return;
+    struct kraken_impl *k = v->impl;
+    kraken_ws_stop(k); /* joins reader thread if running */
     /* never log credentials */
-    memset(v->impl, 0, sizeof(struct kraken_impl));
-    free(v->impl);
+    memset(k, 0, sizeof(*k));
+    free(k);
     free(v);
 }
 
@@ -656,6 +677,257 @@ venue_t *venue_kraken_create(const char *api_key, const char *api_secret,
     v->impl = k;
     return v;
 }
+
+/* ================= WebSocket ticker feed ================= */
+
+#if defined(_WIN32)
+
+#define WS_QUEUE_CAP 256
+#define WS_HOST L"ws.kraken.com"
+#define WS_PATH L"/v2"
+
+static void ws_queue_push(struct kraken_impl *k, const ts_mkt_event *ev)
+{
+    EnterCriticalSection(&k->ws_lock);
+    if (k->ws_count < WS_QUEUE_CAP) {
+        k->ws_queue[k->ws_tail] = *ev;
+        k->ws_tail = (k->ws_tail + 1) % WS_QUEUE_CAP;
+        k->ws_count++;
+    } else {
+        ts_metrics_inc(k->metrics, TS_MET_RECON_BREAKS, 1); /* drop+count */
+    }
+    LeaveCriticalSection(&k->ws_lock);
+}
+
+/* Extract a JSON number following "key": within [start,end). */
+static bool ws_json_num(const char *start, const char *end,
+                        const char *key, double *out)
+{
+    char pat[32];
+    snprintf(pat, sizeof(pat), "\"%s\":", key);
+    const char *p = start;
+    size_t plen = strlen(pat);
+    while (p && p < end) {
+        p = strstr(p, pat);
+        if (!p || p + plen >= end) return false;
+        const char *v = p + plen;
+        while (*v == ' ' || *v == '\t') v++;
+        char *ep = NULL;
+        double d = strtod(v, &ep);
+        if (ep != v) { *out = d; return true; }
+        p = v;
+    }
+    return false;
+}
+
+/* Kraken WS v2 symbol: BTCUSDT -> BTC/USD, ETHUSDT -> ETH/USD,
+ * otherwise USDT-suffixed codes map to BASE/USD. */
+static void ws_symbol(const char *instrument, char *out, size_t cap)
+{
+    size_t len = strlen(instrument);
+    if (len > 4 && strcmp(instrument + len - 4, "USDT") == 0) {
+        size_t blen = len - 4;
+        if (blen + 5 < cap) {
+            memcpy(out, instrument, blen);
+            snprintf(out + blen, cap - blen, "/USD");
+            return;
+        }
+    }
+    snprintf(out, cap, "%s", instrument);
+}
+
+/* Parse one ticker payload: {"channel":"ticker","type":"snapshot",
+ * "data":[{"symbol":"BTC/USD","bid":..,"ask":..,"last":..,"timestamp":".."}]}
+ * Returns true if a quote was extracted. */
+static bool ws_parse_ticker(const char *buf, size_t len,
+                            const char *instrument, ts_mkt_event *out)
+{
+    const char *data = strstr(buf, "\"data\":");
+    if (!data) return false;
+    const char *obj = strchr(data, '{');
+    if (!obj || (size_t)(obj - buf) > len) return false;
+    /* object ends at next '}' */
+    const char *oend = strchr(obj, '}');
+    if (!oend) oend = buf + len;
+
+    /* only handle snapshot/update for our symbol: check "symbol" field */
+    char sym[64] = "";
+    {
+        const char *sp = strstr(obj, "\"symbol\":\"");
+        if (sp && sp < oend) {
+            sp += 10;
+            const char *se = strchr(sp, '"');
+            if (se && se - sp < (ptrdiff_t)sizeof(sym)) {
+                memcpy(sym, sp, (size_t)(se - sp));
+                sym[se - sp] = '\0';
+            }
+        }
+    }
+    char want[64];
+    ws_symbol(instrument, want, sizeof(want));
+    if (sym[0] && strcmp(sym, want) != 0) {
+        return false;
+    }
+
+    double bid = 0, ask = 0, last = 0, ts_ms = 0;
+    bool ok = false;
+    ok |= ws_json_num(obj, oend, "bid", &bid);
+    ok |= ws_json_num(obj, oend, "ask", &ask);
+    ok |= ws_json_num(obj, oend, "last", &last);
+    ws_json_num(obj, oend, "timestamp", &ts_ms);
+    if (!ok || (bid <= 0 && ask <= 0 && last <= 0)) {
+        return false;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->type = TS_MKT_QUOTE;
+    ts_copy_str(out->instrument, sizeof(out->instrument), instrument);
+    out->bid = bid;
+    out->ask = ask;
+    out->last = last > 0 ? last : (bid + ask) * 0.5;
+    out->ts_ns = (ts_ts_ns)(ts_ms * 1e6); /* Kraken ts is epoch ms */
+    if (out->ts_ns == 0) {
+        out->ts_ns = now_ns(NULL); /* fallback: unused impl ctx */
+    }
+    return true;
+}
+
+static DWORD WINAPI kraken_ws_main(LPVOID arg)
+{
+    struct kraken_impl *k = arg;
+    HINTERNET session = NULL, connect = NULL, request = NULL;
+    HINTERNET sock = NULL;
+
+    session = WinHttpOpen(L"trading_system_c/0.1",
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) goto done;
+    WinHttpSetTimeouts(session, 10000, 10000, 10000, 15000);
+    connect = WinHttpConnect(session, WS_HOST, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!connect) goto done;
+    request = WinHttpOpenRequest(connect, L"GET", WS_PATH, NULL,
+        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        WINHTTP_FLAG_SECURE);
+    if (!request) goto done;
+
+    if (!WinHttpSetOption(request, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, NULL, 0))
+        goto done;
+    if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+            WINHTTP_NO_REQUEST_DATA, 0, 0, 0))
+        goto done;
+    if (!WinHttpReceiveResponse(request, NULL)) goto done;
+
+    sock = WinHttpWebSocketCompleteUpgrade(request, 0);
+    if (!sock) goto done;
+    k->ws_socket = sock;
+
+    /* subscribe to ticker for our symbol */
+    char sym[64];
+    ws_symbol(k->ws_instrument, sym, sizeof(sym));
+    char sub[256];
+    snprintf(sub, sizeof(sub),
+        "{\"method\":\"subscribe\",\"params\":{\"channel\":\"ticker\","
+        "\"symbol\":[\"%s\"]}}", sym);
+    if (WinHttpWebSocketSend(sock,
+            WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+            sub, (DWORD)strlen(sub)) != ERROR_SUCCESS) {
+        goto done;
+    }
+
+    /* receive loop */
+    for (;;) {
+        if (k->ws_stop) break;
+        char buf[8192];
+        DWORD br = 0;
+        WINHTTP_WEB_SOCKET_BUFFER_TYPE btype;
+        DWORD err = WinHttpWebSocketReceive(sock, buf, sizeof(buf) - 1,
+                                            &br, &btype);
+        if (err != ERROR_SUCCESS || br == 0) break;
+        buf[br] = '\0';
+        ts_mkt_event ev;
+        if (ws_parse_ticker(buf, br, k->ws_instrument, &ev)) {
+            ws_queue_push(k, &ev);
+        }
+    }
+
+done:
+    if (sock) WinHttpWebSocketClose(sock,
+        WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, NULL, 0);
+    if (sock) WinHttpCloseHandle(sock);
+    if (request) WinHttpCloseHandle(request);
+    if (connect) WinHttpCloseHandle(connect);
+    if (session) WinHttpCloseHandle(session);
+    InterlockedExchange(&k->ws_running, 0);
+    return 0;
+}
+
+ts_status venue_kraken_ws_start(venue_t *v, const char *instrument)
+{
+    struct kraken_impl *k = v->impl;
+    if (!instrument || !instrument[0]) return TS_ERR_INVALID_ARG;
+    if (k->ws_running) return TS_OK;
+    if (!k->ws_lock_init) {
+        InitializeCriticalSection(&k->ws_lock);
+        k->ws_lock_init = true;
+    }
+    ts_copy_str(k->ws_instrument, sizeof(k->ws_instrument), instrument);
+    k->ws_head = k->ws_tail = k->ws_count = 0;
+    k->ws_stop = 0;
+    k->ws_thread = CreateThread(NULL, 0, kraken_ws_main, k, 0, NULL);
+    if (!k->ws_thread) return TS_ERR_BAD_STATE;
+    InterlockedExchange(&k->ws_running, 1);
+    return TS_OK;
+}
+
+ts_status venue_kraken_next_market_event(venue_t *v, ts_mkt_event *out)
+{
+    struct kraken_impl *k = v->impl;
+    if (!k->ws_lock_init) return TS_ERR_NOT_FOUND;
+    EnterCriticalSection(&k->ws_lock);
+    ts_status st = TS_ERR_NOT_FOUND;
+    if (k->ws_count > 0) {
+        *out = k->ws_queue[k->ws_head];
+        k->ws_head = (k->ws_head + 1) % WS_QUEUE_CAP;
+        k->ws_count--;
+        st = TS_OK;
+    }
+    LeaveCriticalSection(&k->ws_lock);
+    return st;
+}
+
+bool venue_kraken_ws_running(venue_t *v)
+{
+    struct kraken_impl *k = v->impl;
+    return k->ws_running != 0;
+}
+
+static void kraken_ws_stop(struct kraken_impl *k)
+{
+    if (!k->ws_lock_init) return;
+    InterlockedExchange(&k->ws_stop, 1);
+    /* closing the socket unblocks a pending receive */
+    void *sock = k->ws_socket;
+    if (sock) {
+        WinHttpWebSocketClose(sock, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS,
+                              NULL, 0);
+    }
+    if (k->ws_thread) {
+        WaitForSingleObject(k->ws_thread, 5000);
+        CloseHandle(k->ws_thread);
+        k->ws_thread = NULL;
+    }
+}
+
+#else /* !_WIN32 */
+
+ts_status venue_kraken_ws_start(venue_t *v, const char *i)
+{ (void)v; (void)i; return TS_ERR_BAD_STATE; }
+ts_status venue_kraken_next_market_event(venue_t *v, ts_mkt_event *o)
+{ (void)v; (void)o; return TS_ERR_NOT_FOUND; }
+bool venue_kraken_ws_running(venue_t *v) { (void)v; return false; }
+static void kraken_ws_stop(struct kraken_impl *k) { (void)k; }
+
+#endif /* _WIN32 */
 
 /* Public market-data helper: fetch Ticker and normalize to QUOTE.
  * Returns TS_OK and fills *out, or error. Caller drives cadence. */

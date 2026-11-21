@@ -3,6 +3,7 @@
 #include "trading/ems.h"
 #include "trading/events.h"
 #include "trading/journal.h"
+#include "trading/kraken_ws.h"
 #include "trading/log.h"
 #include "trading/metrics.h"
 #include "trading/oms.h"
@@ -403,9 +404,17 @@ static int cmd_live(const char *journal_path, const char *instrument,
         ts_log(TS_LOG_ERROR, "failed to create kraken venue");
         return 1;
     }
+    /* Prefer the WebSocket ticker feed; REST ticker is the fallback. */
+    const char *live_instr = instrument;
+    if (cfg) {
+        live_instr = ts_config_get(cfg, "strategy", "instrument",
+                                   live_instr);
+    }
+    ts_status ws_st = venue_kraken_ws_start(venue, live_instr);
+    bool use_ws = (ws_st == TS_OK);
     ts_log(TS_LOG_INFO, "live mode: venue=kraken instrument=%s "
-           "interval=%dms duration=%ds", instrument, interval_ms,
-           duration_s);
+           "feed=%s interval=%dms duration=%ds", live_instr,
+           use_ws ? "websocket" : "rest-poll", interval_ms, duration_s);
 
     ems_config ecfg = {.venue = venue, .oms = oms, .rms = rms,
                        .metrics = &metrics, .clock = clock};
@@ -435,9 +444,17 @@ static int cmd_live(const char *journal_path, const char *instrument,
     size_t events = 0;
     int elapsed = 0;
     while (duration_s <= 0 || elapsed < duration_s * 1000) {
-        ts_status st = venue_kraken_get_ticker(venue,
-            mcfg.instrument[0] ? mcfg.instrument : instrument,
-            &ev, clock);
+        ts_status st;
+        if (use_ws && venue_kraken_ws_running(venue)) {
+            st = venue_kraken_next_market_event(venue, &ev);
+            if (st != TS_OK) {
+                st = TS_ERR_NOT_FOUND; /* queue empty: idle this tick */
+            }
+        } else {
+            st = venue_kraken_get_ticker(venue,
+                mcfg.instrument[0] ? mcfg.instrument : live_instr,
+                &ev, clock);
+        }
         if (st == TS_OK) {
             events++;
             vclock.now = ev.ts_ns;
@@ -453,8 +470,12 @@ static int cmd_live(const char *journal_path, const char *instrument,
             ts_metrics_inc(&metrics, TS_MET_MKT_STALE, 1);
         }
         ems_poll(ems);
-        sleep_ms(interval_ms);
-        elapsed += interval_ms;
+        /* WS feed updates faster than REST cadence — poll the queue
+         * more frequently when it's the active source. */
+        int sleep_ms_now = use_ws ? (interval_ms < 50 ? interval_ms : 50)
+                                  : interval_ms;
+        sleep_ms(sleep_ms_now);
+        elapsed += sleep_ms_now;
     }
 
     ts_recon_report rep;

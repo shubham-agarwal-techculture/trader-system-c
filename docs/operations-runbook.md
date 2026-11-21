@@ -65,11 +65,12 @@ via `ems_reconcile`.
 ## Live mode (Kraken)
 
 `trading_sim live` requires `[live] enabled = true`, Kraken env creds,
-and a `[venue] type = kraken` config. It polls the public Ticker
-endpoint at `--interval-ms` cadence, runs seqwatch -> RMS marks ->
-strategy -> OMS/RMS/EMS -> `ems_poll` (which diffs TradesHistory for
-fills), and ends with `ems_reconcile` + metrics. Orders are REAL —
-start with minimum-size limits and `rms_kill` ready.
+and a `[venue] type = kraken` config. Market data comes from the Kraken
+WebSocket v2 ticker feed (public channel) when available, else REST
+Ticker polling at `--interval-ms`. The loop runs seqwatch -> RMS marks
+-> strategy -> OMS/RMS/EMS -> `ems_poll` (TradesHistory diff for fills),
+and ends with `ems_reconcile` + metrics. Orders are REAL — start with
+minimum-size limits and `rms_kill` ready.
 
 ## Emergency procedures
 

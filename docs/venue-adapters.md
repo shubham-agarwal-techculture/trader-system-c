@@ -70,8 +70,15 @@ HTTPS, no external TLS/WS dependency).
 - **Executions**: `TradesHistory` diffed by trade id inside `poll()`
   (250ms throttle) -> `EXEC` events
 - **Reconciliation**: `OpenOrders` REST -> `open_orders` op
-- **Market data**: `venue_kraken_get_ticker()` (public `Ticker` endpoint,
-  no auth) — wired into the feed loop by the live runner
+- **Market data**: two modes —
+  - WebSocket v2 ticker (`wss://ws.kraken.com/v2`, public channel, no
+    auth): dedicated reader thread pushes normalized QUOTE events to a
+    bounded 256-slot queue drained by `venue_kraken_next_market_event()`
+    in the live loop. Symbol mapping: `BTCUSDT`->`BTC/USD`,
+    `ETHUSDT`->`ETH/USD`, other `*USDT`->`BASE/USD`.
+  - REST `Ticker` fallback via `venue_kraken_get_ticker()`
+- `trading_sim live` auto-prefers WS and falls back to REST polling if
+  the WS thread fails to start; queue-empty ticks idle at ~50ms cadence
 - **Auth**: `KRAKEN_API_KEY` / `KRAKEN_API_SECRET` env vars only — never
   config files, journal, or logs
 - **Pair mapping**: `BTCUSDT`->`XBTUSD`, `ETHUSDT`->`ETHUSD`, others pass
